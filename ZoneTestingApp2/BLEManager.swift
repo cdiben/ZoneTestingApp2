@@ -16,6 +16,14 @@ protocol BLEManagerDelegate: AnyObject {
     func didUpdateSerialNumber(_ device: BLEDevice)
     func didUpdateFirmwareVersion(_ device: BLEDevice, version: String)
     func didUpdateBatteryLevel(_ device: BLEDevice, percent: Int)
+    func didSendCommand(_ command: [UInt8])
+    func didReceiveReply(_ bytes: [UInt8])
+}
+
+// Provide default empty implementations so conformers can implement selectively
+extension BLEManagerDelegate {
+    func didSendCommand(_ command: [UInt8]) {}
+    func didReceiveReply(_ bytes: [UInt8]) {}
 }
 
 protocol BLEFirmwareUpdateDelegate: AnyObject {
@@ -58,7 +66,7 @@ class BLEManager: NSObject, ObservableObject {
     @Published var isConnected = false
     
     // Commands to send
-    private let startWorkoutCommand: [UInt8] = [0x40, 0x08]
+    private let startWorkoutCommand: [UInt8] = [0x40, 0x08, 0x08, 0x07]
     private let stopWorkoutCommand: [UInt8] = [0x40, 0x09]
     private let setTimeCommandPrefix: [UInt8] = [0x40, 0x04]
     private let batteryLevelCommand: [UInt8] = [0x40, 0x06]
@@ -358,6 +366,10 @@ class BLEManager: NSObject, ObservableObject {
         let writeType: CBCharacteristicWriteType = characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
         peripheral.writeValue(data, for: characteristic, type: writeType)
         print("Sent command: \(command.map { String(format: "0x%02X", $0) }.joined(separator: " "))")
+        // Notify delegate of actual command sent
+        DispatchQueue.main.async {
+            self.delegate?.didSendCommand(command)
+        }
     }
     
     private func invalidateConnectionTimer() {
@@ -632,6 +644,10 @@ extension BLEManager: CBPeripheralDelegate {
                 
                 // Firmware ACK handling
                 let bytes = [UInt8](data)
+                // Notify delegate of generic reply
+                DispatchQueue.main.async {
+                    self.delegate?.didReceiveReply(bytes)
+                }
                 if bytes == fwAckHeader {
                     print("Firmware: Received header ACK")
                     sendNextFirmwareChunk()

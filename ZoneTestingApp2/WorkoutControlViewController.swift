@@ -33,6 +33,8 @@ class WorkoutControlViewController: UIViewController {
     private var connectionStartTime: Date?
     private var workoutStartTime: Date?
     private var isWorkoutActive = false
+    private var recentSentCommands: [String] = []
+    private var recentReplies: [String] = []
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -527,6 +529,35 @@ extension WorkoutControlViewController: BLEManagerDelegate {
             let names = UserDefaults.standard.dictionary(forKey: "CustomDeviceNames") as? [String: String] ?? [:]
             let key = device.serialNumber ?? device.id
             self.deviceNameLabel.text = names[key] ?? device.name
+        }
+    }
+
+    func didSendCommand(_ command: [UInt8]) {
+        let hex = command.map { String(format: "0x%02X", $0) }.joined(separator: " ")
+        DispatchQueue.main.async {
+            // Maintain stack of last two commands
+            self.recentSentCommands.insert("Sent: \(hex)", at: 0)
+            if self.recentSentCommands.count > 2 { self.recentSentCommands.removeLast() }
+            // Compose with last two replies
+            let combined = zip(self.recentSentCommands, self.recentReplies + ["", ""]).map { sent, reply in
+                reply.isEmpty ? sent : "\(sent)\nReply: \(reply)"
+            }
+            self.commandStatusLabel.text = combined.prefix(2).joined(separator: "\n")
+            self.commandStatusLabel.textColor = .systemGreen
+        }
+    }
+
+    func didReceiveReply(_ bytes: [UInt8]) {
+        let hex = bytes.map { String(format: "0x%02X", $0) }.joined(separator: " ")
+        DispatchQueue.main.async {
+            self.recentReplies.insert(hex, at: 0)
+            if self.recentReplies.count > 2 { self.recentReplies.removeLast() }
+            // Re-compose with sends
+            let combined = zip(self.recentSentCommands + ["", ""], self.recentReplies).map { sent, reply in
+                sent.isEmpty ? "Reply: \(reply)" : "\(sent)\nReply: \(reply)"
+            }
+            self.commandStatusLabel.text = combined.prefix(2).joined(separator: "\n")
+            self.commandStatusLabel.textColor = .systemGreen
         }
     }
     
