@@ -227,6 +227,11 @@ class WorkoutControlViewController: UIViewController {
             workoutTimerLabel.topAnchor.constraint(equalTo: connectionTimerLabel.bottomAnchor, constant: 10),
             workoutTimerLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             workoutTimerLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+
+            // Firmware progress label moved under workout timer
+            firmwareProgressLabel.topAnchor.constraint(equalTo: workoutTimerLabel.bottomAnchor, constant: 10),
+            firmwareProgressLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            firmwareProgressLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             
             // Start workout button
             startWorkoutButton.topAnchor.constraint(equalTo: workoutTimerLabel.bottomAnchor, constant: 40),
@@ -252,16 +257,12 @@ class WorkoutControlViewController: UIViewController {
             disconnectButton.heightAnchor.constraint(equalToConstant: 50)
         ])
 
-        // Place firmware UI above disconnect button
+        // Place firmware button above disconnect button
         NSLayoutConstraint.activate([
             updateFirmwareButton.bottomAnchor.constraint(equalTo: disconnectButton.topAnchor, constant: -16),
             updateFirmwareButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
             updateFirmwareButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
-            updateFirmwareButton.heightAnchor.constraint(equalToConstant: 50),
-
-            firmwareProgressLabel.bottomAnchor.constraint(equalTo: updateFirmwareButton.topAnchor, constant: -8),
-            firmwareProgressLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            firmwareProgressLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20)
+            updateFirmwareButton.heightAnchor.constraint(equalToConstant: 50)
         ])
 
         // (Battery label is constrained near the top above)
