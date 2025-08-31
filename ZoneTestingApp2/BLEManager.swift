@@ -114,6 +114,9 @@ class BLEManager: NSObject, ObservableObject {
         var bytesSentExcludingPending: Int { offset }
     }
     private var firmwareContext: FirmwareUpdateContext?
+    // Expose firmware update state
+    var isFirmwareUpdating: Bool { firmwareContext != nil }
+    private var isCancellingFirmwareUpdate = false
     
     // Common BLE service UUIDs that might be used for fitness devices
     private let commonServiceUUIDs: [CBUUID] = [
@@ -288,6 +291,13 @@ class BLEManager: NSObject, ObservableObject {
         sendFirmwareHeader()
     }
 
+    // Allow user to cancel update; send tail to clear device state
+    func cancelFirmwareUpdate() {
+        guard firmwareContext != nil else { return }
+        isCancellingFirmwareUpdate = true
+        sendFirmwareTail()
+    }
+
     private func sendFirmwareHeader() {
         guard var ctx = firmwareContext else { return }
         // Construct 5-byte header:
@@ -353,6 +363,13 @@ class BLEManager: NSObject, ObservableObject {
         var payload = fwTailCommand
         payload.append(contentsOf: tailBytes)
         sendCommand(payload)
+        if isCancellingFirmwareUpdate {
+            isCancellingFirmwareUpdate = false
+            firmwareContext = nil
+            DispatchQueue.main.async {
+                self.firmwareDelegate?.firmwareUpdateFailed(error: "Cancelled")
+            }
+        }
     }
     
     private func sendCommand(_ command: [UInt8]) {

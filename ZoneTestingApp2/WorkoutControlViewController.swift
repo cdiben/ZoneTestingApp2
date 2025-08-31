@@ -16,8 +16,7 @@ class WorkoutControlViewController: UIViewController {
     private var deviceNameLabel: UILabel!
     private var firmwareVersionLabel: UILabel!
     private var connectionStatusLabel: UILabel!
-    private var connectionTimerLabel: UILabel!
-    private var workoutTimerLabel: UILabel!
+    
     private var startWorkoutButton: UIButton!
     private var stopWorkoutButton: UIButton!
     private var disconnectButton: UIButton!
@@ -27,12 +26,7 @@ class WorkoutControlViewController: UIViewController {
     private var batteryLabel: UILabel!
     private var blueLedButton: UIButton!
     
-    // Timer properties
-    private var connectionTimer: Timer?
-    private var workoutTimer: Timer?
-    private var connectionStartTime: Date?
-    private var workoutStartTime: Date?
-    private var isWorkoutActive = false
+    // Track last two commands and replies for on-screen log
     private var recentSentCommands: [String] = []
     private var recentReplies: [String] = []
     
@@ -40,7 +34,7 @@ class WorkoutControlViewController: UIViewController {
         super.viewDidLoad()
         setupUI()
         setupBLEManager()
-        startConnectionTimer()
+        
         print("WorkoutControlViewController: View loaded for device: \(connectedDevice?.name ?? "Unknown")")
     }
     
@@ -94,23 +88,7 @@ class WorkoutControlViewController: UIViewController {
         connectionStatusLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(connectionStatusLabel)
         
-        // Connection timer label
-        connectionTimerLabel = UILabel()
-        connectionTimerLabel.text = "Connected: 00:00:00"
-        connectionTimerLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 16, weight: .medium)
-        connectionTimerLabel.textAlignment = .center
-        connectionTimerLabel.textColor = .systemBlue
-        connectionTimerLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(connectionTimerLabel)
         
-        // Workout timer label
-        workoutTimerLabel = UILabel()
-        workoutTimerLabel.text = "Workout: 00:00:00"
-        workoutTimerLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 16, weight: .medium)
-        workoutTimerLabel.textAlignment = .center
-        workoutTimerLabel.textColor = .systemGray
-        workoutTimerLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(workoutTimerLabel)
         
         // Start workout button
         startWorkoutButton = UIButton(type: .system)
@@ -218,23 +196,15 @@ class WorkoutControlViewController: UIViewController {
             connectionStatusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             connectionStatusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             
-            // Connection timer label
-            connectionTimerLabel.topAnchor.constraint(equalTo: connectionStatusLabel.bottomAnchor, constant: 15),
-            connectionTimerLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            connectionTimerLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             
-            // Workout timer label
-            workoutTimerLabel.topAnchor.constraint(equalTo: connectionTimerLabel.bottomAnchor, constant: 10),
-            workoutTimerLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            workoutTimerLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
 
-            // Firmware progress label moved under workout timer
-            firmwareProgressLabel.topAnchor.constraint(equalTo: workoutTimerLabel.bottomAnchor, constant: 10),
+            // Firmware progress label moved under Stop Workout and above command status
+            firmwareProgressLabel.topAnchor.constraint(equalTo: stopWorkoutButton.bottomAnchor, constant: 10),
             firmwareProgressLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             firmwareProgressLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             
-            // Start workout button
-            startWorkoutButton.topAnchor.constraint(equalTo: workoutTimerLabel.bottomAnchor, constant: 40),
+            // Start workout button (now directly below connection status with extra spacing)
+            startWorkoutButton.topAnchor.constraint(equalTo: connectionStatusLabel.bottomAnchor, constant: 80),
             startWorkoutButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
             startWorkoutButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
             startWorkoutButton.heightAnchor.constraint(equalToConstant: 60),
@@ -245,8 +215,8 @@ class WorkoutControlViewController: UIViewController {
             stopWorkoutButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
             stopWorkoutButton.heightAnchor.constraint(equalToConstant: 60),
             
-            // Command status label
-            commandStatusLabel.topAnchor.constraint(equalTo: stopWorkoutButton.bottomAnchor, constant: 30),
+            // Command status label (now below firmware status)
+            commandStatusLabel.topAnchor.constraint(equalTo: firmwareProgressLabel.bottomAnchor, constant: 10),
             commandStatusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             commandStatusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             
@@ -267,9 +237,9 @@ class WorkoutControlViewController: UIViewController {
 
         // (Battery label is constrained near the top above)
 
-        // Blue LED button constraints (place above firmware progress)
+        // Blue LED button constraints (place just above Start Workout button, matching spacing)
         NSLayoutConstraint.activate([
-            blueLedButton.bottomAnchor.constraint(equalTo: firmwareProgressLabel.topAnchor, constant: -12),
+            blueLedButton.bottomAnchor.constraint(equalTo: startWorkoutButton.topAnchor, constant: -16),
             blueLedButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
             blueLedButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
             blueLedButton.heightAnchor.constraint(equalToConstant: 44)
@@ -338,71 +308,7 @@ class WorkoutControlViewController: UIViewController {
     
     // MARK: - Timer Management
     
-    private func startConnectionTimer() {
-        connectionStartTime = Date()
-        connectionTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            self.updateConnectionTimerDisplay()
-        }
-        print("Connection timer started")
-    }
-
-    @objc private func updateFirmwareTapped() {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.data])
-        picker.allowsMultipleSelection = false
-        picker.delegate = self
-        present(picker, animated: true)
-    }
-
-    
-    private func startWorkoutTimer() {
-        workoutStartTime = Date()
-        workoutTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            self.updateWorkoutTimerDisplay()
-        }
-        isWorkoutActive = true
-        workoutTimerLabel.textColor = .systemGreen
-        print("Workout timer started")
-    }
-    
-    private func stopWorkoutTimer() {
-        workoutTimer?.invalidate()
-        workoutTimer = nil
-        isWorkoutActive = false
-        workoutTimerLabel.textColor = .systemGray
-        print("Workout timer stopped")
-    }
-    
-    private func stopAllTimers() {
-        connectionTimer?.invalidate()
-        connectionTimer = nil
-        connectionStartTime = nil
-        
-        workoutTimer?.invalidate()
-        workoutTimer = nil
-        workoutStartTime = nil
-        isWorkoutActive = false
-        
-        print("All timers stopped")
-    }
-    
-    private func updateConnectionTimerDisplay() {
-        guard let startTime = connectionStartTime else { return }
-        let elapsed = Date().timeIntervalSince(startTime)
-        connectionTimerLabel.text = "Connected: \(formatTime(elapsed))"
-    }
-    
-    private func updateWorkoutTimerDisplay() {
-        guard let startTime = workoutStartTime else { return }
-        let elapsed = Date().timeIntervalSince(startTime)
-        workoutTimerLabel.text = "Workout: \(formatTime(elapsed))"
-    }
-    
-    private func formatTime(_ timeInterval: TimeInterval) -> String {
-        let hours = Int(timeInterval) / 3600
-        let minutes = Int(timeInterval) % 3600 / 60
-        let seconds = Int(timeInterval) % 60
-        return String(format: "%02d:%02d:%02d", hours, minutes, seconds)
-    }
+    private func stopAllTimers() {}
     
     private func updateConnectionStatus() {
         if bleManager.isConnected {
@@ -430,7 +336,6 @@ class WorkoutControlViewController: UIViewController {
         
         // Send set time first, then start workout
         bleManager.setTimeThenStartWorkout()
-        startWorkoutTimer()
         commandStatusLabel.text = "Sent: Set Time (0x4004 + 4 bytes), then Start (0x4008)"
         commandStatusLabel.textColor = .systemGreen
         
@@ -445,7 +350,6 @@ class WorkoutControlViewController: UIViewController {
         }
         
         bleManager.stopWorkout()
-        stopWorkoutTimer()
         commandStatusLabel.text = "Sent: Stop Workout (0x4009)"
         commandStatusLabel.textColor = .systemRed
         
@@ -460,17 +364,13 @@ class WorkoutControlViewController: UIViewController {
         
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Disconnect", style: .destructive) { _ in
-            // Calculate final timer values before stopping
-            let finalConnectionDuration = self.connectionStartTime?.timeIntervalSinceNow.magnitude ?? 0
-            let finalWorkoutDuration = self.workoutStartTime?.timeIntervalSinceNow.magnitude ?? 0
-            
             // Pass timer values back to device list
             if let deviceListVC = self.navigationController?.viewControllers.first as? DeviceListViewController,
                let deviceName = self.connectedDevice?.name {
                 deviceListVC.updateLastSession(
                     deviceName: deviceName,
-                    connectionDuration: finalConnectionDuration,
-                    workoutDuration: finalWorkoutDuration
+                    connectionDuration: 0,
+                    workoutDuration: 0
                 )
             }
             
@@ -479,6 +379,20 @@ class WorkoutControlViewController: UIViewController {
         })
         
         present(alert, animated: true)
+    }
+
+    @objc private func updateFirmwareTapped() {
+        if bleManager.isFirmwareUpdating {
+            // Stop update
+            bleManager.cancelFirmwareUpdate()
+            updateFirmwareButton.setTitle("Update Firmware", for: .normal)
+            updateFirmwareButton.backgroundColor = .systemIndigo
+        } else {
+            let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.data])
+            picker.allowsMultipleSelection = false
+            picker.delegate = self
+            present(picker, animated: true)
+        }
     }
 
     @objc private func blueLedTapped() {
@@ -565,21 +479,12 @@ extension WorkoutControlViewController: BLEManagerDelegate {
     func didDisconnectFromDevice(_ device: BLEDevice) {
         print("WorkoutControlViewController: Disconnected from device: \(device.name)")
         DispatchQueue.main.async {
-            // Calculate final timer values before stopping
-            let finalConnectionDuration = self.connectionStartTime?.timeIntervalSinceNow.magnitude ?? 0
-            let finalWorkoutDuration = self.workoutStartTime?.timeIntervalSinceNow.magnitude ?? 0
-            
-            self.stopAllTimers()
-            self.updateConnectionStatus()
-            self.commandStatusLabel.text = "Device disconnected"
-            self.commandStatusLabel.textColor = .systemRed
-            
             // Pass timer values back to device list
             if let deviceListVC = self.navigationController?.viewControllers.first as? DeviceListViewController {
                 deviceListVC.updateLastSession(
                     deviceName: device.name,
-                    connectionDuration: finalConnectionDuration,
-                    workoutDuration: finalWorkoutDuration
+                    connectionDuration: 0,
+                    workoutDuration: 0
                 )
                 print("WorkoutControlViewController: Updated last session data")
             }
@@ -593,19 +498,12 @@ extension WorkoutControlViewController: BLEManagerDelegate {
     func didFailToConnect(_ device: BLEDevice, error: Error?) {
         print("WorkoutControlViewController: Failed to connect to device: \(device.name), error: \(error?.localizedDescription ?? "Unknown")")
         DispatchQueue.main.async {
-            // Calculate final timer values before stopping
-            let finalConnectionDuration = self.connectionStartTime?.timeIntervalSinceNow.magnitude ?? 0
-            let finalWorkoutDuration = self.workoutStartTime?.timeIntervalSinceNow.magnitude ?? 0
-            
-            self.stopAllTimers()
-            self.updateConnectionStatus()
-            
             // Pass timer values back to device list
             if let deviceListVC = self.navigationController?.viewControllers.first as? DeviceListViewController {
                 deviceListVC.updateLastSession(
                     deviceName: device.name,
-                    connectionDuration: finalConnectionDuration,
-                    workoutDuration: finalWorkoutDuration
+                    connectionDuration: 0,
+                    workoutDuration: 0
                 )
                 print("WorkoutControlViewController: Updated last session data after failure")
             }
@@ -644,18 +542,26 @@ extension WorkoutControlViewController: BLEFirmwareUpdateDelegate {
         DispatchQueue.main.async {
             let percent = totalBytes > 0 ? Int((Double(bytesSent) / Double(totalBytes)) * 100.0) : 0
             self.firmwareProgressLabel.text = "Firmware Update: \(bytesSent)/\(totalBytes) (\(percent)%)"
+            if self.bleManager.isFirmwareUpdating {
+                self.updateFirmwareButton.setTitle("Stop Update", for: .normal)
+                self.updateFirmwareButton.backgroundColor = .systemRed
+            }
         }
     }
     
     func firmwareUpdateCompleted() {
         DispatchQueue.main.async {
             self.firmwareProgressLabel.text = "Firmware Update: Completed"
+            self.updateFirmwareButton.setTitle("Update Firmware", for: .normal)
+            self.updateFirmwareButton.backgroundColor = .systemIndigo
         }
     }
     
     func firmwareUpdateFailed(error: String) {
         DispatchQueue.main.async {
             self.firmwareProgressLabel.text = "Firmware Update: Failed - \(error)"
+            self.updateFirmwareButton.setTitle("Update Firmware", for: .normal)
+            self.updateFirmwareButton.backgroundColor = .systemIndigo
         }
     }
 }
