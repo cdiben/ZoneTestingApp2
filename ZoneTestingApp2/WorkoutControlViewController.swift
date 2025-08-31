@@ -6,6 +6,7 @@
 //
 
 import UIKit
+import UniformTypeIdentifiers
 
 class WorkoutControlViewController: UIViewController {
     
@@ -13,6 +14,7 @@ class WorkoutControlViewController: UIViewController {
     
     private let bleManager = BLEManager.shared
     private var deviceNameLabel: UILabel!
+    private var firmwareVersionLabel: UILabel!
     private var connectionStatusLabel: UILabel!
     private var connectionTimerLabel: UILabel!
     private var workoutTimerLabel: UILabel!
@@ -20,6 +22,8 @@ class WorkoutControlViewController: UIViewController {
     private var stopWorkoutButton: UIButton!
     private var disconnectButton: UIButton!
     private var commandStatusLabel: UILabel!
+    private var updateFirmwareButton: UIButton!
+    private var firmwareProgressLabel: UILabel!
     
     // Timer properties
     private var connectionTimer: Timer?
@@ -63,6 +67,18 @@ class WorkoutControlViewController: UIViewController {
         deviceNameLabel.textColor = .label
         deviceNameLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(deviceNameLabel)
+        deviceNameLabel.isUserInteractionEnabled = true
+        let tapGesture = UITapGestureRecognizer(target: self, action: #selector(renameDeviceTapped))
+        deviceNameLabel.addGestureRecognizer(tapGesture)
+
+        // Firmware version label
+        firmwareVersionLabel = UILabel()
+        firmwareVersionLabel.text = ""
+        firmwareVersionLabel.font = UIFont.systemFont(ofSize: 14)
+        firmwareVersionLabel.textAlignment = .center
+        firmwareVersionLabel.textColor = .secondaryLabel
+        firmwareVersionLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(firmwareVersionLabel)
         
         // Connection status label
         connectionStatusLabel = UILabel()
@@ -133,6 +149,27 @@ class WorkoutControlViewController: UIViewController {
         disconnectButton.translatesAutoresizingMaskIntoConstraints = false
         disconnectButton.addTarget(self, action: #selector(disconnectTapped), for: .touchUpInside)
         view.addSubview(disconnectButton)
+
+        // Update Firmware button
+        updateFirmwareButton = UIButton(type: .system)
+        updateFirmwareButton.setTitle("Update Firmware", for: .normal)
+        updateFirmwareButton.titleLabel?.font = UIFont.boldSystemFont(ofSize: 18)
+        updateFirmwareButton.backgroundColor = .systemIndigo
+        updateFirmwareButton.setTitleColor(.white, for: .normal)
+        updateFirmwareButton.layer.cornerRadius = 10
+        updateFirmwareButton.translatesAutoresizingMaskIntoConstraints = false
+        updateFirmwareButton.addTarget(self, action: #selector(updateFirmwareTapped), for: .touchUpInside)
+        view.addSubview(updateFirmwareButton)
+
+        // Firmware progress label
+        firmwareProgressLabel = UILabel()
+        firmwareProgressLabel.text = ""
+        firmwareProgressLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 14, weight: .regular)
+        firmwareProgressLabel.textAlignment = .center
+        firmwareProgressLabel.textColor = .systemIndigo
+        firmwareProgressLabel.numberOfLines = 2
+        firmwareProgressLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(firmwareProgressLabel)
         
         // Setup constraints
         NSLayoutConstraint.activate([
@@ -141,8 +178,13 @@ class WorkoutControlViewController: UIViewController {
             deviceNameLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             deviceNameLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             
+            // Firmware version label
+            firmwareVersionLabel.topAnchor.constraint(equalTo: deviceNameLabel.bottomAnchor, constant: 4),
+            firmwareVersionLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            firmwareVersionLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+
             // Connection status label
-            connectionStatusLabel.topAnchor.constraint(equalTo: deviceNameLabel.bottomAnchor, constant: 10),
+            connectionStatusLabel.topAnchor.constraint(equalTo: firmwareVersionLabel.bottomAnchor, constant: 10),
             connectionStatusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             connectionStatusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             
@@ -179,13 +221,25 @@ class WorkoutControlViewController: UIViewController {
             disconnectButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
             disconnectButton.heightAnchor.constraint(equalToConstant: 50)
         ])
+
+        // Place firmware UI above disconnect button
+        NSLayoutConstraint.activate([
+            updateFirmwareButton.bottomAnchor.constraint(equalTo: disconnectButton.topAnchor, constant: -16),
+            updateFirmwareButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
+            updateFirmwareButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
+            updateFirmwareButton.heightAnchor.constraint(equalToConstant: 50),
+
+            firmwareProgressLabel.bottomAnchor.constraint(equalTo: updateFirmwareButton.topAnchor, constant: -8),
+            firmwareProgressLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            firmwareProgressLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20)
+        ])
         
         // Add some visual enhancements
         addButtonShadows()
     }
     
     private func addButtonShadows() {
-        let buttons = [startWorkoutButton, stopWorkoutButton, disconnectButton]
+        let buttons = [startWorkoutButton, stopWorkoutButton, disconnectButton, updateFirmwareButton]
         
         for button in buttons {
             button?.layer.shadowColor = UIColor.black.cgColor
@@ -197,6 +251,48 @@ class WorkoutControlViewController: UIViewController {
     
     private func setupBLEManager() {
         bleManager.delegate = self
+        bleManager.firmwareDelegate = self
+    }
+
+    @objc private func renameDeviceTapped() {
+        guard let device = connectedDevice else { return }
+        let alert = UIAlertController(title: "Rename Device", message: nil, preferredStyle: .alert)
+        alert.addTextField { textField in
+            textField.placeholder = "Enter name"
+            textField.text = self.loadCustomNames()[self.deviceKey(device) ?? ""] ?? device.name
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Save", style: .default, handler: { _ in
+            let name = alert.textFields?.first?.text
+            self.setCustomName(name, for: device)
+            self.deviceNameLabel.text = name?.isEmpty == false ? name : device.name
+        }))
+        present(alert, animated: true)
+    }
+
+    private func deviceKey(_ device: BLEDevice) -> String? {
+        return device.serialNumber ?? device.id
+    }
+    private func loadCustomNames() -> [String: String] {
+        let dict = UserDefaults.standard.dictionary(forKey: "CustomDeviceNames") as? [String: String]
+        return dict ?? [:]
+    }
+    private func saveCustomNames(_ names: [String: String]) {
+        UserDefaults.standard.set(names, forKey: "CustomDeviceNames")
+    }
+    private func customName(for device: BLEDevice) -> String? {
+        guard let key = deviceKey(device) else { return nil }
+        return loadCustomNames()[key]
+    }
+    private func setCustomName(_ name: String?, for device: BLEDevice) {
+        guard let key = deviceKey(device) else { return }
+        var names = loadCustomNames()
+        if let name = name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            names[key] = name
+        } else {
+            names.removeValue(forKey: key)
+        }
+        saveCustomNames(names)
     }
     
     // MARK: - Timer Management
@@ -207,6 +303,13 @@ class WorkoutControlViewController: UIViewController {
             self.updateConnectionTimerDisplay()
         }
         print("Connection timer started")
+    }
+
+    @objc private func updateFirmwareTapped() {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.data])
+        picker.allowsMultipleSelection = false
+        picker.delegate = self
+        present(picker, animated: true)
     }
     
     private func startWorkoutTimer() {
@@ -370,6 +473,10 @@ extension WorkoutControlViewController: BLEManagerDelegate {
             self.updateConnectionStatus()
             self.commandStatusLabel.text = "Connected! Ready to send commands"
             self.commandStatusLabel.textColor = .systemBlue
+            // Use custom name if available
+            let names = UserDefaults.standard.dictionary(forKey: "CustomDeviceNames") as? [String: String] ?? [:]
+            let key = device.serialNumber ?? device.id
+            self.deviceNameLabel.text = names[key] ?? device.name
         }
     }
     
@@ -431,6 +538,119 @@ extension WorkoutControlViewController: BLEManagerDelegate {
         // Update the connected device if it matches
         if connectedDevice?.id == device.id {
             connectedDevice = device
+            // Refresh displayed name using saved custom name keyed by serial if available
+            let names = UserDefaults.standard.dictionary(forKey: "CustomDeviceNames") as? [String: String] ?? [:]
+            let key = device.serialNumber ?? device.id
+            let display = names[key] ?? device.name
+            DispatchQueue.main.async {
+                self.deviceNameLabel.text = display
+            }
+        }
+    }
+
+    func didUpdateFirmwareVersion(_ device: BLEDevice, version: String) {
+        guard connectedDevice?.id == device.id else { return }
+        DispatchQueue.main.async {
+            self.firmwareVersionLabel.text = "Firmware: \(version)"
         }
     }
 } 
+
+// MARK: - Firmware Delegate
+extension WorkoutControlViewController: BLEFirmwareUpdateDelegate {
+    func firmwareUpdateProgress(bytesSent: Int, totalBytes: Int) {
+        DispatchQueue.main.async {
+            let percent = totalBytes > 0 ? Int((Double(bytesSent) / Double(totalBytes)) * 100.0) : 0
+            self.firmwareProgressLabel.text = "Firmware Update: \(bytesSent)/\(totalBytes) (\(percent)%)"
+        }
+    }
+    
+    func firmwareUpdateCompleted() {
+        DispatchQueue.main.async {
+            self.firmwareProgressLabel.text = "Firmware Update: Completed"
+        }
+    }
+    
+    func firmwareUpdateFailed(error: String) {
+        DispatchQueue.main.async {
+            self.firmwareProgressLabel.text = "Firmware Update: Failed - \(error)"
+        }
+    }
+}
+
+// MARK: - Document Picker
+extension WorkoutControlViewController: UIDocumentPickerDelegate {
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard let url = urls.first else { return }
+        var data: Data?
+        let needsStop = url.startAccessingSecurityScopedResource()
+        defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
+        var coordinatorError: NSError?
+        let coordinator = NSFileCoordinator()
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinatorError) { coordinatedURL in
+            do {
+                data = try Data(contentsOf: coordinatedURL)
+            } catch {
+                data = nil
+            }
+        }
+        if data == nil {
+            // Fallback: copy to a temporary location and read
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(url.lastPathComponent)
+            try? FileManager.default.removeItem(at: tempURL)
+            do {
+                try FileManager.default.copyItem(at: url, to: tempURL)
+                data = try Data(contentsOf: tempURL)
+            } catch {
+                data = nil
+            }
+        }
+        if let rawData = data {
+            let effectiveData = parseHexFileIfNeeded(rawData)
+            firmwareProgressLabel.text = "Firmware file loaded: \(effectiveData.count) bytes"
+            let first5 = [UInt8](effectiveData.prefix(5)).map { String(format: "%02X", $0) }.joined(separator: " ")
+            print("Firmware first 5 bytes: \(first5)")
+            bleManager.startFirmwareUpdate(with: effectiveData)
+        } else {
+            let message = coordinatorError?.localizedDescription ?? "The file could not be opened."
+            firmwareProgressLabel.text = "Failed to load file: \(message)"
+        }
+    }
+}
+ 
+private extension WorkoutControlViewController {
+    func parseHexFileIfNeeded(_ data: Data) -> Data {
+        guard let text = String(data: data, encoding: .utf8) else {
+            return data
+        }
+        let allowed = CharacterSet(charactersIn: "0123456789ABCDEFabcdefxX:-_,; \n\r\t")
+        let isHexLike = text.unicodeScalars.allSatisfy { allowed.contains($0) }
+        guard isHexLike else { return data }
+        var cleaned = text
+            .replacingOccurrences(of: "0x", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: ":", with: "")
+            .replacingOccurrences(of: ",", with: "")
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+            .replacingOccurrences(of: "\t", with: "")
+        let hexSet = CharacterSet(charactersIn: "0123456789ABCDEFabcdef")
+        cleaned = String(cleaned.unicodeScalars.filter { hexSet.contains($0) })
+        guard cleaned.count >= 2, cleaned.count % 2 == 0 else { return data }
+        var bytes: [UInt8] = []
+        bytes.reserveCapacity(cleaned.count / 2)
+        var idx = cleaned.startIndex
+        while idx < cleaned.endIndex {
+            let next = cleaned.index(idx, offsetBy: 2)
+            let byteStr = cleaned[idx..<next]
+            if let value = UInt8(byteStr, radix: 16) {
+                bytes.append(value)
+            } else {
+                return data
+            }
+            idx = next
+        }
+        return Data(bytes)
+    }
+}

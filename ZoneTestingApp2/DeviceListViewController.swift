@@ -17,6 +17,7 @@ class DeviceListViewController: UIViewController {
     
     private let bleManager = BLEManager.shared
     private var devices: [BLEDevice] = []
+    private let customNamesDefaultsKey = "CustomDeviceNames"
     
     // Last session data
     private var lastConnectionDuration: TimeInterval = 0
@@ -135,6 +136,38 @@ class DeviceListViewController: UIViewController {
         devices = bleManager.discoveredDevices
         print("DeviceListViewController: BLE manager setup complete")
     }
+
+    // MARK: - Custom Names
+    private func deviceKey(_ device: BLEDevice) -> String? {
+        // Prefer serial number for stability, fall back to peripheral UUID
+        return device.serialNumber ?? device.id
+    }
+    
+    private func loadCustomNames() -> [String: String] {
+        let dict = UserDefaults.standard.dictionary(forKey: customNamesDefaultsKey) as? [String: String]
+        return dict ?? [:]
+    }
+    
+    private func saveCustomNames(_ names: [String: String]) {
+        UserDefaults.standard.set(names, forKey: customNamesDefaultsKey)
+    }
+    
+    private func customName(for device: BLEDevice) -> String? {
+        guard let key = deviceKey(device) else { return nil }
+        return loadCustomNames()[key]
+    }
+    
+    private func setCustomName(_ name: String?, for device: BLEDevice) {
+        guard let key = deviceKey(device) else { return }
+        var names = loadCustomNames()
+        if let name = name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            names[key] = name
+        } else {
+            names.removeValue(forKey: key)
+        }
+        saveCustomNames(names)
+        updateUI()
+    }
     
     private func updateScanButtonState() {
         if bleManager.isScanning {
@@ -252,7 +285,8 @@ extension DeviceListViewController: UITableViewDataSource {
     func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
         let cell = tableView.dequeueReusableCell(withIdentifier: "DeviceCell", for: indexPath) as! DeviceTableViewCell
         let device = devices[indexPath.row]
-        cell.configure(with: device)
+        let displayName = customName(for: device) ?? device.name
+        cell.configure(with: device, displayName: displayName)
         return cell
     }
 }
@@ -265,9 +299,9 @@ extension DeviceListViewController: UITableViewDelegate {
         let device = devices[indexPath.row]
         print("DeviceListViewController: User selected device: \(device.name)")
         print("DeviceListViewController: Current BLE manager isConnected: \(bleManager.isConnected)")
-        
-        statusLabel.text = "Connecting to \(device.name)..."
-        
+
+        statusLabel.text = "Connecting to \(customName(for: device) ?? device.name)..."
+
         bleManager.connect(to: device)
         print("DeviceListViewController: Called bleManager.connect()")
     }
@@ -320,6 +354,11 @@ extension DeviceListViewController: BLEManagerDelegate {
     func didUpdateSerialNumber(_ device: BLEDevice) {
         print("DeviceListViewController: Updated serial number for device: \(device.name)")
         updateUI()
+    }
+
+    func didUpdateFirmwareVersion(_ device: BLEDevice, version: String) {
+        // Not shown on this screen; handled in workout controller
+        print("DeviceListViewController: Firmware version for \(device.name): \(version)")
     }
 }
 
@@ -385,8 +424,8 @@ class DeviceTableViewCell: UITableViewCell {
         ])
     }
     
-    func configure(with device: BLEDevice) {
-        nameLabel.text = device.name
+    func configure(with device: BLEDevice, displayName: String? = nil) {
+        nameLabel.text = displayName ?? device.name
         
         // Use the serial number from the Device Information Service
         if let serialNumber = device.serialNumber {
