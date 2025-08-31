@@ -24,6 +24,8 @@ class WorkoutControlViewController: UIViewController {
     private var commandStatusLabel: UILabel!
     private var updateFirmwareButton: UIButton!
     private var firmwareProgressLabel: UILabel!
+    private var batteryLabel: UILabel!
+    private var blueLedButton: UIButton!
     
     // Timer properties
     private var connectionTimer: Timer?
@@ -48,15 +50,16 @@ class WorkoutControlViewController: UIViewController {
         print("WorkoutControlViewController: Set as BLE delegate")
         
         updateConnectionStatus()
+        navigationController?.setNavigationBarHidden(true, animated: false)
     }
     
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
+        navigationController?.setNavigationBarHidden(false, animated: false)
         print("WorkoutControlViewController: View will disappear")
     }
     
     private func setupUI() {
-        title = "Workout Control"
         view.backgroundColor = .systemBackground
         
         // Device name label
@@ -170,6 +173,26 @@ class WorkoutControlViewController: UIViewController {
         firmwareProgressLabel.numberOfLines = 2
         firmwareProgressLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(firmwareProgressLabel)
+
+        // Battery label
+        batteryLabel = UILabel()
+        batteryLabel.text = "Battery: --%"
+        batteryLabel.font = UIFont.systemFont(ofSize: 14)
+        batteryLabel.textAlignment = .center
+        batteryLabel.textColor = .label
+        batteryLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(batteryLabel)
+
+        // Blue LED button
+        blueLedButton = UIButton(type: .system)
+        blueLedButton.setTitle("Blue LED", for: .normal)
+        blueLedButton.titleLabel?.font = UIFont.boldSystemFont(ofSize: 16)
+        blueLedButton.backgroundColor = .systemBlue
+        blueLedButton.setTitleColor(.white, for: .normal)
+        blueLedButton.layer.cornerRadius = 10
+        blueLedButton.translatesAutoresizingMaskIntoConstraints = false
+        blueLedButton.addTarget(self, action: #selector(blueLedTapped), for: .touchUpInside)
+        view.addSubview(blueLedButton)
         
         // Setup constraints
         NSLayoutConstraint.activate([
@@ -183,8 +206,13 @@ class WorkoutControlViewController: UIViewController {
             firmwareVersionLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             firmwareVersionLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
 
+            // Battery label (moved under firmware version)
+            batteryLabel.topAnchor.constraint(equalTo: firmwareVersionLabel.bottomAnchor, constant: 6),
+            batteryLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            batteryLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+
             // Connection status label
-            connectionStatusLabel.topAnchor.constraint(equalTo: firmwareVersionLabel.bottomAnchor, constant: 10),
+            connectionStatusLabel.topAnchor.constraint(equalTo: batteryLabel.bottomAnchor, constant: 10),
             connectionStatusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             connectionStatusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             
@@ -233,13 +261,23 @@ class WorkoutControlViewController: UIViewController {
             firmwareProgressLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             firmwareProgressLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20)
         ])
+
+        // (Battery label is constrained near the top above)
+
+        // Blue LED button constraints (place above firmware progress)
+        NSLayoutConstraint.activate([
+            blueLedButton.bottomAnchor.constraint(equalTo: firmwareProgressLabel.topAnchor, constant: -12),
+            blueLedButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
+            blueLedButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
+            blueLedButton.heightAnchor.constraint(equalToConstant: 44)
+        ])
         
         // Add some visual enhancements
         addButtonShadows()
     }
     
     private func addButtonShadows() {
-        let buttons = [startWorkoutButton, stopWorkoutButton, disconnectButton, updateFirmwareButton]
+        let buttons = [startWorkoutButton, stopWorkoutButton, disconnectButton, updateFirmwareButton, blueLedButton]
         
         for button in buttons {
             button?.layer.shadowColor = UIColor.black.cgColor
@@ -311,6 +349,7 @@ class WorkoutControlViewController: UIViewController {
         picker.delegate = self
         present(picker, animated: true)
     }
+
     
     private func startWorkoutTimer() {
         workoutStartTime = Date()
@@ -437,6 +476,17 @@ class WorkoutControlViewController: UIViewController {
         })
         
         present(alert, animated: true)
+    }
+
+    @objc private func blueLedTapped() {
+        guard bleManager.isConnected else {
+            showAlert(title: "Not Connected", message: "Device is not connected")
+            return
+        }
+        bleManager.sendBlueLedCommand()
+        commandStatusLabel.text = "Sent: Blue LED (0x4021 4B 00 00 00 32)"
+        commandStatusLabel.textColor = .systemBlue
+        animateButton(blueLedButton)
     }
     
     private func animateButton(_ button: UIButton) {
@@ -614,6 +664,16 @@ extension WorkoutControlViewController: UIDocumentPickerDelegate {
         } else {
             let message = coordinatorError?.localizedDescription ?? "The file could not be opened."
             firmwareProgressLabel.text = "Failed to load file: \(message)"
+        }
+    }
+}
+
+// MARK: - Battery Updates
+extension WorkoutControlViewController {
+    func didUpdateBatteryLevel(_ device: BLEDevice, percent: Int) {
+        guard connectedDevice?.id == device.id else { return }
+        DispatchQueue.main.async {
+            self.batteryLabel.text = "Battery: \(percent)%"
         }
     }
 }

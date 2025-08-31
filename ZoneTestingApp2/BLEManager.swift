@@ -15,6 +15,7 @@ protocol BLEManagerDelegate: AnyObject {
     func didFailToConnect(_ device: BLEDevice, error: Error?)
     func didUpdateSerialNumber(_ device: BLEDevice)
     func didUpdateFirmwareVersion(_ device: BLEDevice, version: String)
+    func didUpdateBatteryLevel(_ device: BLEDevice, percent: Int)
 }
 
 protocol BLEFirmwareUpdateDelegate: AnyObject {
@@ -28,6 +29,7 @@ struct BLEDevice {
     let name: String
     let rssi: Int
     var serialNumber: String?
+    var firmwareVersion: String?
     
     var id: String {
         return peripheral.identifier.uuidString
@@ -59,6 +61,7 @@ class BLEManager: NSObject, ObservableObject {
     private let startWorkoutCommand: [UInt8] = [0x40, 0x08]
     private let stopWorkoutCommand: [UInt8] = [0x40, 0x09]
     private let setTimeCommandPrefix: [UInt8] = [0x40, 0x04]
+    private let batteryLevelCommand: [UInt8] = [0x40, 0x06]
 
     // Firmware update command bytes
     private let fwHeaderCommand: [UInt8] = [0x40, 0x12]
@@ -84,6 +87,11 @@ class BLEManager: NSObject, ObservableObject {
             guard self.isConnected, self.rxCharacteristic != nil, !self.hasSentPostConnectInit else { return }
             self.sendCommand(self.postConnectInitCommand)
             self.hasSentPostConnectInit = true
+            // After sending init, request battery level shortly after
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                guard let self = self, self.isConnected else { return }
+                self.requestBatteryLevel()
+            }
         }
         postConnectInitWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: work)
@@ -220,6 +228,14 @@ class BLEManager: NSObject, ObservableObject {
     
     func stopWorkout() {
         sendCommand(stopWorkoutCommand)
+    }
+    
+    func requestBatteryLevel() {
+        sendCommand(batteryLevelCommand)
+    }
+
+    func sendBlueLedCommand() {
+        sendCommand(postConnectInitCommand)
     }
     
     func setDeviceTime(epochSeconds: UInt64? = nil) {
@@ -484,6 +500,12 @@ extension BLEManager: CBCentralManagerDelegate {
             }
         }
     }
+
+    private func updateDeviceFirmwareVersion(_ peripheral: CBPeripheral, version: String) {
+        if let index = discoveredDevices.firstIndex(where: { $0.peripheral == peripheral }) {
+            discoveredDevices[index].firmwareVersion = version
+        }
+    }
 }
 
 // MARK: - CBPeripheralDelegate
@@ -593,6 +615,8 @@ extension BLEManager: CBPeripheralDelegate {
                 if let versionStr = String(data: data, encoding: .utf8) {
                     print("Read firmware revision: \(versionStr)")
                     if let device = self.discoveredDevices.first(where: { $0.peripheral == peripheral }) {
+                        // Persist on the device record
+                        self.updateDeviceFirmwareVersion(peripheral, version: versionStr)
                         DispatchQueue.main.async {
                             self.delegate?.didUpdateFirmwareVersion(device, version: versionStr)
                         }
@@ -621,6 +645,15 @@ extension BLEManager: CBPeripheralDelegate {
                     }
                     firmwareDelegate?.firmwareUpdateCompleted()
                     firmwareContext = nil
+                } else if bytes.count >= 4 && bytes[0] == 0x40 && bytes[1] == 0x86 {
+                    // Battery response: last two bytes are battery level in hex
+                    let value = (Int(bytes[2]) << 8) | Int(bytes[3])
+                    let percent = max(0, min(100, value))
+                    if let device = self.discoveredDevices.first(where: { $0.peripheral == peripheral }) {
+                        DispatchQueue.main.async {
+                            self.delegate?.didUpdateBatteryLevel(device, percent: percent)
+                        }
+                    }
                 }
             }
         }

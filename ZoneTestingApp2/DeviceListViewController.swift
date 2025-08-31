@@ -42,7 +42,16 @@ class DeviceListViewController: UIViewController {
     }
     
     private func setupUI() {
-        title = "Zone Devices"
+        title = nil
+        let titleLabel = UILabel()
+        titleLabel.text = "Zone Devices"
+        titleLabel.font = UIFont.boldSystemFont(ofSize: 20)
+        titleLabel.textColor = .label
+        titleLabel.textAlignment = .center
+        titleLabel.sizeToFit()
+        navigationItem.titleView = titleLabel
+        navigationController?.navigationBar.prefersLargeTitles = false
+        navigationItem.largeTitleDisplayMode = .never
         
         // Create UI elements programmatically since we don't have a storyboard
         view.backgroundColor = .systemBackground
@@ -360,6 +369,11 @@ extension DeviceListViewController: BLEManagerDelegate {
         // Not shown on this screen; handled in workout controller
         print("DeviceListViewController: Firmware version for \(device.name): \(version)")
     }
+
+    func didUpdateBatteryLevel(_ device: BLEDevice, percent: Int) {
+        // Not displayed here
+        print("DeviceListViewController: Battery for \(device.name): \(percent)%")
+    }
 }
 
 // MARK: - Custom Table View Cell
@@ -397,7 +411,7 @@ class DeviceTableViewCell: UITableViewCell {
         rssiLabel.textColor = .secondaryLabel
         rssiLabel.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(rssiLabel)
-        
+
         // Signal strength image
         signalImageView.contentMode = .scaleAspectFit
         signalImageView.translatesAutoresizingMaskIntoConstraints = false
