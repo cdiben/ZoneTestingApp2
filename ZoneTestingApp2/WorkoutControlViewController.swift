@@ -30,6 +30,14 @@ class WorkoutControlViewController: UIViewController {
     private var recentSentCommands: [String] = []
     private var recentReplies: [String] = []
     
+    // Recording state for workout byte stream
+    private var isRecordingWorkout: Bool = false
+    private var isAwaitingStartAck: Bool = false
+    private var recordedWorkoutData: Data = Data()
+    private var workoutStartDate: Date?
+    // Track intent for document picker (firmware vs export)
+    private var isSelectingFirmwareFile: Bool = false
+    
     override func viewDidLoad() {
         super.viewDidLoad()
         setupUI()
@@ -388,6 +396,7 @@ class WorkoutControlViewController: UIViewController {
             updateFirmwareButton.setTitle("Update Firmware", for: .normal)
             updateFirmwareButton.backgroundColor = .systemIndigo
         } else {
+            isSelectingFirmwareFile = true
             let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType.data])
             picker.allowsMultipleSelection = false
             picker.delegate = self
@@ -414,6 +423,46 @@ class WorkoutControlViewController: UIViewController {
                 button.transform = CGAffineTransform.identity
             }
         }
+    }
+    
+    private func stopRecordingAndPromptSave() {
+        // End any pending start state
+        isAwaitingStartAck = false
+        defer {
+            // Reset state after attempting save
+            isRecordingWorkout = false
+            workoutStartDate = nil
+            recordedWorkoutData.removeAll(keepingCapacity: false)
+        }
+        guard !recordedWorkoutData.isEmpty else {
+            showAlert(title: "No BLE Data", message: "")
+            return
+        }
+        // Create a temporary CSV file to export with space-separated hex byte pairs
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd_HHmmss"
+        let stamp = formatter.string(from: workoutStartDate ?? Date())
+        let baseName = sanitizeFilename((connectedDevice?.name ?? "workout").replacingOccurrences(of: " ", with: "_"))
+        let fileName = "\(baseName)_\(stamp).csv"
+        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        do {
+            let hexString = recordedWorkoutData.map { String(format: "%02X", $0) }.joined(separator: " ") + "\n"
+            let csvData = Data(hexString.utf8)
+            try csvData.write(to: tempURL, options: .atomic)
+            let picker = UIDocumentPickerViewController(forExporting: [tempURL])
+            picker.allowsMultipleSelection = false
+            // Do not set delegate here; export completion should not trigger firmware handling
+            isSelectingFirmwareFile = false
+            present(picker, animated: true)
+        } catch {
+            showAlert(title: "Save Failed", message: error.localizedDescription)
+        }
+    }
+    
+    private func sanitizeFilename(_ name: String) -> String {
+        let invalid = CharacterSet(charactersIn: "\\/:*?\"<>|\n\r\t")
+        let cleanedScalars = name.unicodeScalars.map { invalid.contains($0) ? "_" : String($0) }.joined()
+        return cleanedScalars.isEmpty ? "workout" : cleanedScalars
     }
     
     private func showAlert(title: String, message: String) {
@@ -450,6 +499,20 @@ extension WorkoutControlViewController: BLEManagerDelegate {
     func didSendCommand(_ command: [UInt8]) {
         let hex = command.map { String(format: "0x%02X", $0) }.joined(separator: " ")
         DispatchQueue.main.async {
+            // Recognize workout start/stop commands to control recording lifecycle
+            let startBytes: [UInt8] = [0x40, 0x08, 0x08, 0x07]
+            let stopBytes: [UInt8] = [0x40, 0x09]
+            if command == startBytes {
+                self.isAwaitingStartAck = true
+                self.isRecordingWorkout = false
+                self.recordedWorkoutData.removeAll(keepingCapacity: false)
+                self.workoutStartDate = nil
+            }
+            if command == stopBytes {
+                if self.isRecordingWorkout || self.isAwaitingStartAck {
+                    self.stopRecordingAndPromptSave()
+                }
+            }
             // Maintain stack of last two commands
             self.recentSentCommands.insert("Sent: \(hex)", at: 0)
             if self.recentSentCommands.count > 2 { self.recentSentCommands.removeLast() }
@@ -465,6 +528,21 @@ extension WorkoutControlViewController: BLEManagerDelegate {
     func didReceiveReply(_ bytes: [UInt8]) {
         let hex = bytes.map { String(format: "0x%02X", $0) }.joined(separator: " ")
         DispatchQueue.main.async {
+            // Start recording after the first reply following Start command.
+            // Do NOT write the 0x40 0x88 0x00 start-ack bytes; only record data after it.
+            var payloadToAppend: [UInt8] = bytes
+            if self.isAwaitingStartAck {
+                self.isAwaitingStartAck = false
+                self.isRecordingWorkout = true
+                self.workoutStartDate = Date()
+                let startAck: [UInt8] = [0x40, 0x88, 0x00]
+                if bytes.count >= startAck.count && Array(bytes.prefix(startAck.count)) == startAck {
+                    payloadToAppend = Array(bytes.dropFirst(startAck.count))
+                }
+            }
+            if self.isRecordingWorkout && !payloadToAppend.isEmpty {
+                self.recordedWorkoutData.append(contentsOf: payloadToAppend)
+            }
             self.recentReplies.insert(hex, at: 0)
             if self.recentReplies.count > 2 { self.recentReplies.removeLast() }
             // Re-compose with sends
@@ -569,6 +647,7 @@ extension WorkoutControlViewController: BLEFirmwareUpdateDelegate {
 // MARK: - Document Picker
 extension WorkoutControlViewController: UIDocumentPickerDelegate {
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        guard isSelectingFirmwareFile else { return }
         guard let url = urls.first else { return }
         var data: Data?
         let needsStop = url.startAccessingSecurityScopedResource()
@@ -603,6 +682,7 @@ extension WorkoutControlViewController: UIDocumentPickerDelegate {
             let message = coordinatorError?.localizedDescription ?? "The file could not be opened."
             firmwareProgressLabel.text = "Failed to load file: \(message)"
         }
+        isSelectingFirmwareFile = false
     }
 }
 
