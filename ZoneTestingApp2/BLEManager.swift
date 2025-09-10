@@ -328,8 +328,8 @@ class BLEManager: NSObject, ObservableObject {
 
     private func sendNextFirmwareChunk() {
         guard var ctx = firmwareContext else { return }
-        // Use fixed 128-byte data chunks for 0x40 0x13 stage as requested
-        let maxChunkPayload = 128
+        // Use fixed 200-byte data chunks for 0x40 0x13 stage as requested
+        let maxChunkPayload = 200
         if ctx.offset >= ctx.last32Start {
             // Move to tail stage
             firmwareContext = ctx
@@ -447,9 +447,9 @@ extension BLEManager: CBCentralManagerDelegate {
             print("No manufacturer data found")
         }
         
-        // Filter by serial number prefix "126" as requested
-        guard let sn = serialNumber, sn.hasPrefix("126") else {
-            // Skip devices whose serial number doesn't start with 126 (or unavailable)
+        // Filter by serial number prefix "126" or "127"
+        guard let sn = serialNumber, (sn.hasPrefix("126") || sn.hasPrefix("127")) else {
+            // Skip devices whose serial number doesn't start with 126 or 127 (or unavailable)
             return
         }
         
