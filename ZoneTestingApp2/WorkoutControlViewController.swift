@@ -46,6 +46,13 @@ class WorkoutControlViewController: UIViewController {
     // Incremental recording to file
     private var recordingFileURL: URL?
     private var recordingFileHandle: FileHandle?
+    // Reconnect management for unexpected disconnects
+    private var pendingReconnectDevice: BLEDevice?
+    private var reconnectDeadline: Date?
+    private var reconnectTimer: Timer?
+    private var isAttemptingReconnect: Bool = false
+    private var forcePopToScanOnSave: Bool = false
+    private var reconnectAlert: UIAlertController?
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -607,6 +614,141 @@ class WorkoutControlViewController: UIViewController {
         present(alert, animated: true)
     }
     
+    private func dismissReconnectAlertIfShowing() {
+        if let a = reconnectAlert {
+            a.dismiss(animated: true)
+            reconnectAlert = nil
+        } else if let presented = self.presentedViewController as? UIAlertController,
+                  presented.title == "Reconnecting..." {
+            presented.dismiss(animated: true)
+            reconnectAlert = nil
+        }
+    }
+    
+    // MARK: - Reconnect logic on unexpected disconnect
+    private func presentReconnectAlertAndStartLoop() {
+        reconnectTimer?.invalidate()
+        guard let target = pendingReconnectDevice else { return }
+        // Present non-blocking alert with Cancel option
+        let alert = UIAlertController(title: "Reconnecting...",
+                                      message: "Attempting to reconnect to the device. You can stop and save now.",
+                                      preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Stop and Save", style: .destructive, handler: { _ in
+            self.reconnectTimer?.invalidate()
+            self.isAttemptingReconnect = false
+            self.pendingReconnectDevice = nil
+            self.dismissReconnectAlertIfShowing()
+            self.presentSaveAfterReconnectFailure()
+        }))
+        self.reconnectAlert = alert
+        present(alert, animated: true)
+        attemptReconnect(to: target)
+        reconnectTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] timer in
+            guard let self = self else { return }
+            if self.bleManager.isConnected {
+                // Reconnected; dismiss alert and continue
+                timer.invalidate()
+                self.isAttemptingReconnect = false
+                self.pendingReconnectDevice = nil
+                self.dismissReconnectAlertIfShowing()
+                return
+            }
+            // Keep attempting reconnect until user cancels
+            self.attemptReconnect(to: target)
+        }
+    }
+    
+    private func attemptReconnect(to device: BLEDevice) {
+        // If we still have the peripheral reference, ask BLEManager to connect
+        bleManager.connect(to: device)
+    }
+    
+    private func presentSaveAfterReconnectFailure() {
+        // Reuse the same save dialog but ensure we pop to scan after export
+        guard !recordedWorkoutData.isEmpty || !capturedSamples.isEmpty else {
+            self.navigationController?.popViewController(animated: true)
+            return
+        }
+        isAwaitingStartAck = false
+        let confirm = UIAlertController(title: "Save Data?", message: "Could not reconnect. Save the recorded data?", preferredStyle: .alert)
+        confirm.addAction(UIAlertAction(title: "Discard", style: .destructive, handler: { _ in
+            self.isRecordingWorkout = false
+            self.workoutStartDate = nil
+            self.recordedWorkoutData.removeAll(keepingCapacity: false)
+            self.capturedSamples.removeAll(keepingCapacity: false)
+            self.streamAssemblyBuffer.removeAll(keepingCapacity: false)
+            self.closeIncrementalRecording(deleteFile: true)
+            self.navigationController?.popViewController(animated: true)
+        }))
+        confirm.addAction(UIAlertAction(title: "Save", style: .default, handler: { _ in
+            let dataToSave = self.recordedWorkoutData
+            let samplesToSave = self.capturedSamples
+            let exportStartDate = self.workoutStartDate
+            self.isRecordingWorkout = false
+            self.workoutStartDate = nil
+            self.recordedWorkoutData.removeAll(keepingCapacity: false)
+            self.capturedSamples.removeAll(keepingCapacity: false)
+            self.streamAssemblyBuffer.removeAll(keepingCapacity: false)
+            let incrementalURL = self.recordingFileURL
+            self.closeIncrementalRecording()
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MMddyyyy_HHmm"
+            let stamp = formatter.string(from: exportStartDate ?? Date())
+            let serialDigits = (self.connectedDevice?.serialNumber ?? "").filter { $0.isNumber }
+            let lastFiveRaw = String(serialDigits.suffix(5))
+            let lastFive = (lastFiveRaw.count < 5) ? String(repeating: "0", count: 5 - lastFiveRaw.count) + lastFiveRaw : lastFiveRaw
+            let fileName = "ZonePcks_\(lastFive)_\(stamp).csv"
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+            do {
+                if let incURL = incrementalURL, FileManager.default.fileExists(atPath: incURL.path) {
+                    try? FileManager.default.removeItem(at: tempURL)
+                    try FileManager.default.moveItem(at: incURL, to: tempURL)
+                } else {
+                    var lines: [String] = []
+                    if !samplesToSave.isEmpty {
+                        lines = samplesToSave.map { sample in
+                            let tsStr = String(sample.timestamp)
+                            let hex = sample.bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+                            return tsStr + "," + hex
+                        }
+                    } else {
+                        let bytes = [UInt8](dataToSave)
+                        var index = 0
+                        let sampleLength = 83
+                        while index + sampleLength <= bytes.count {
+                            if bytes[index] == 0x40 && bytes[index + 1] == 0xE1 {
+                                let sample = bytes[index..<(index + sampleLength)]
+                                let tsStr = String(UInt32(Date().timeIntervalSince1970))
+                                let hex = sample.map { String(format: "%02X", $0) }.joined(separator: " ")
+                                lines.append(tsStr + "," + hex)
+                                index += sampleLength
+                            } else {
+                                index += 1
+                            }
+                        }
+                    }
+                    guard !lines.isEmpty else {
+                        self.showAlert(title: "No BLE Data", message: "")
+                        return
+                    }
+                    let csvString = lines.joined(separator: "\n") + "\n"
+                    let csvData = Data(csvString.utf8)
+                    try csvData.write(to: tempURL, options: .atomic)
+                }
+                let picker = UIDocumentPickerViewController(forExporting: [tempURL])
+                picker.allowsMultipleSelection = false
+                picker.delegate = self
+                self.isSelectingFirmwareFile = false
+                self.isExportingWorkoutFile = true
+                self.exportShouldPopToScan = true
+                self.present(picker, animated: true)
+            } catch {
+                self.showAlert(title: "Save Failed", message: error.localizedDescription)
+            }
+        }))
+        present(confirm, animated: true)
+    }
+    
     deinit {
         stopAllTimers()
     }
@@ -625,6 +767,8 @@ extension WorkoutControlViewController: BLEManagerDelegate {
             self.updateConnectionStatus()
             self.commandStatusLabel.text = "Connected! Ready to send commands"
             self.commandStatusLabel.textColor = .systemBlue
+            // If we were showing reconnect alert, dismiss it now
+            self.dismissReconnectAlertIfShowing()
             // Use custom name if available
             let names = UserDefaults.standard.dictionary(forKey: "CustomDeviceNames") as? [String: String] ?? [:]
             let key = device.serialNumber ?? device.id
@@ -734,92 +878,13 @@ extension WorkoutControlViewController: BLEManagerDelegate {
                 print("WorkoutControlViewController: Updated last session data")
             }
             
-            // If we have unsaved data, offer to save before leaving
-            if !self.recordedWorkoutData.isEmpty {
+            // If we have unsaved data, attempt reconnect for up to 3 minutes before prompting to save
+            if !self.recordedWorkoutData.isEmpty || !self.capturedSamples.isEmpty {
                 self.isAwaitingStartAck = false
-                let confirm = UIAlertController(title: "Save Data?", message: "Device disconnected. Save the recorded data?", preferredStyle: .alert)
-                confirm.addAction(UIAlertAction(title: "Discard", style: .destructive, handler: { _ in
-                    // Discard data and reset, then navigate back
-                    self.isRecordingWorkout = false
-                    self.workoutStartDate = nil
-                    self.recordedWorkoutData.removeAll(keepingCapacity: false)
-                    self.capturedSamples.removeAll(keepingCapacity: false)
-                    self.streamAssemblyBuffer.removeAll(keepingCapacity: false)
-                    self.closeIncrementalRecording(deleteFile: true)
-                    print("WorkoutControlViewController: Discarded unsaved data after disconnect")
-                    self.navigationController?.popViewController(animated: true)
-                }))
-                confirm.addAction(UIAlertAction(title: "Save", style: .default, handler: { _ in
-                    // Capture data and date, then reset state before exporting
-                    let dataToSave = self.recordedWorkoutData
-                    let samplesToSave = self.capturedSamples
-                    let exportStartDate = self.workoutStartDate
-                    self.isRecordingWorkout = false
-                    self.workoutStartDate = nil
-                    self.recordedWorkoutData.removeAll(keepingCapacity: false)
-                    self.capturedSamples.removeAll(keepingCapacity: false)
-                    self.streamAssemblyBuffer.removeAll(keepingCapacity: false)
-                    let incrementalURL = self.recordingFileURL
-                    self.closeIncrementalRecording()
-                    // Build filename
-                    let formatter = DateFormatter()
-                    formatter.dateFormat = "MMddyyyy_HHmm"
-                    let stamp = formatter.string(from: exportStartDate ?? Date())
-                    let serialDigits = (self.connectedDevice?.serialNumber ?? "").filter { $0.isNumber }
-                    let lastFiveRaw = String(serialDigits.suffix(5))
-                    let lastFive = (lastFiveRaw.count < 5) ? String(repeating: "0", count: 5 - lastFiveRaw.count) + lastFiveRaw : lastFiveRaw
-                    let fileName = "ZonePcks_\(lastFive)_\(stamp).csv"
-                    let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-                    do {
-                        // Prefer incremental file if present
-                        if let incURL = incrementalURL, FileManager.default.fileExists(atPath: incURL.path) {
-                            try? FileManager.default.removeItem(at: tempURL)
-                            try FileManager.default.moveItem(at: incURL, to: tempURL)
-                        } else {
-                            // Compose from memory with epoch prefix
-                            var lines: [String] = []
-                            if !samplesToSave.isEmpty {
-                                lines = samplesToSave.map { sample in
-                                    let tsStr = String(sample.timestamp)
-                                    let hex = sample.bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
-                                    return tsStr + "," + hex
-                                }
-                            } else {
-                                let bytes = [UInt8](dataToSave)
-                                var index = 0
-                                let sampleLength = 83
-                                while index + sampleLength <= bytes.count {
-                                    if bytes[index] == 0x40 && bytes[index + 1] == 0xE1 {
-                                        let sample = bytes[index..<(index + sampleLength)]
-                                        let tsStr = String(UInt32(Date().timeIntervalSince1970))
-                                        let hex = sample.map { String(format: "%02X", $0) }.joined(separator: " ")
-                                        lines.append(tsStr + "," + hex)
-                                        index += sampleLength
-                                    } else {
-                                        index += 1
-                                    }
-                                }
-                            }
-                            if lines.isEmpty {
-                                self.showAlert(title: "No BLE Data", message: "")
-                                return
-                            }
-                            let csvString = lines.joined(separator: "\n") + "\n"
-                            let csvData = Data(csvString.utf8)
-                            try csvData.write(to: tempURL, options: .atomic)
-                        }
-                        let picker = UIDocumentPickerViewController(forExporting: [tempURL])
-                        picker.allowsMultipleSelection = false
-                        picker.delegate = self
-                        self.isSelectingFirmwareFile = false
-                        self.isExportingWorkoutFile = true
-                        self.exportShouldPopToScan = true
-                        self.present(picker, animated: true)
-                    } catch {
-                        self.showAlert(title: "Save Failed", message: error.localizedDescription)
-                    }
-                }))
-                self.present(confirm, animated: true)
+                self.pendingReconnectDevice = device
+                self.isAttemptingReconnect = true
+                self.forcePopToScanOnSave = true
+                self.presentReconnectAlertAndStartLoop()
             } else {
                 // Navigate back to device list
                 print("WorkoutControlViewController: Navigating back to device list")
