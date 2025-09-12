@@ -128,7 +128,10 @@ class BLEManager: NSObject, ObservableObject {
     
     override init() {
         super.init()
-        centralManager = CBCentralManager(delegate: self, queue: nil)
+        let options: [String: Any] = [
+            CBCentralManagerOptionRestoreIdentifierKey: "com.zonetestingapp.central.restore"
+        ]
+        centralManager = CBCentralManager(delegate: self, queue: nil, options: options)
     }
     
     func startScanning() {
@@ -416,6 +419,24 @@ extension BLEManager: CBCentralManagerDelegate {
         @unknown default:
             print("Unknown Bluetooth state")
         }
+    }
+    
+    // Support state restoration: iOS relaunches the app in background and calls this.
+    func centralManager(_ central: CBCentralManager, willRestoreState dict: [String : Any]) {
+        print("CBCentralManager willRestoreState")
+        if let peripherals = dict[CBCentralManagerRestoredStatePeripheralsKey] as? [CBPeripheral] {
+            for p in peripherals {
+                print("Restored peripheral: \(p.identifier)")
+                p.delegate = self
+                connectedPeripheral = p
+            }
+        }
+        if let services = dict[CBCentralManagerRestoredStateScanServicesKey] as? [CBUUID], !services.isEmpty {
+            print("Restored scan services: \(services)")
+        }
+        // Re-establish notifications on known characteristics if possible
+        connectedPeripheral?.discoverServices(nil)
+        isConnected = connectedPeripheral != nil
     }
     
     func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String : Any], rssi RSSI: NSNumber) {

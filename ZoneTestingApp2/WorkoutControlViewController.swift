@@ -43,6 +43,9 @@ class WorkoutControlViewController: UIViewController {
     // Streaming parser buffers for timestamped samples
     private var streamAssemblyBuffer: [UInt8] = []
     private var capturedSamples: [(timestamp: UInt32, bytes: [UInt8])] = []
+    // Incremental recording to file
+    private var recordingFileURL: URL?
+    private var recordingFileHandle: FileHandle?
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -244,7 +247,7 @@ class WorkoutControlViewController: UIViewController {
             commandStatusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             
             // Disconnect button
-            disconnectButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -40),
+            disconnectButton.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
             disconnectButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
             disconnectButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
             disconnectButton.heightAnchor.constraint(equalToConstant: 50)
@@ -454,6 +457,7 @@ class WorkoutControlViewController: UIViewController {
             recordedWorkoutData.removeAll(keepingCapacity: false)
             capturedSamples.removeAll(keepingCapacity: false)
             streamAssemblyBuffer.removeAll(keepingCapacity: false)
+            closeIncrementalRecording()
             return
         }
         // Ask user whether to save or discard
@@ -463,6 +467,9 @@ class WorkoutControlViewController: UIViewController {
             self.isRecordingWorkout = false
             self.workoutStartDate = nil
             self.recordedWorkoutData.removeAll(keepingCapacity: false)
+            self.capturedSamples.removeAll(keepingCapacity: false)
+            self.streamAssemblyBuffer.removeAll(keepingCapacity: false)
+            self.closeIncrementalRecording(deleteFile: true)
             // Stay on workout screen (user stayed connected)
         }))
         confirm.addAction(UIAlertAction(title: "Save", style: .default, handler: { _ in
@@ -475,6 +482,8 @@ class WorkoutControlViewController: UIViewController {
             self.recordedWorkoutData.removeAll(keepingCapacity: false)
             self.capturedSamples.removeAll(keepingCapacity: false)
             self.streamAssemblyBuffer.removeAll(keepingCapacity: false)
+            let incrementalURL = self.recordingFileURL
+            self.closeIncrementalRecording()
             // Build filename
             let formatter = DateFormatter()
             formatter.dateFormat = "MMddyyyy_HHmm"
@@ -485,37 +494,44 @@ class WorkoutControlViewController: UIViewController {
             let fileName = "ZonePcks_\(lastFive)_\(stamp).csv"
             let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
             do {
-                // Prefer parsed timestamped samples; fallback to raw parse if none
-                var lines: [String] = []
-                if !samplesToSave.isEmpty {
-                    lines = samplesToSave.map { sample in
-                        let tsStr = String(sample.timestamp)
-                        let hex = sample.bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
-                        return tsStr + "," + hex
-                    }
+                // If we have an incremental file, prefer that; else compose from memory
+                if let incURL = incrementalURL, FileManager.default.fileExists(atPath: incURL.path) {
+                    // Move/rename the incremental file to final name
+                    try? FileManager.default.removeItem(at: tempURL)
+                    try FileManager.default.moveItem(at: incURL, to: tempURL)
                 } else {
-                    let bytes = [UInt8](dataToSave)
-                    var index = 0
-                    let sampleLength = 83
-                    while index + sampleLength <= bytes.count {
-                        if bytes[index] == 0x40 && bytes[index + 1] == 0xE1 {
-                            let sample = bytes[index..<(index + sampleLength)]
-                            let tsStr = String(UInt32(Date().timeIntervalSince1970))
-                            let hex = sample.map { String(format: "%02X", $0) }.joined(separator: " ")
-                            lines.append(tsStr + "," + hex)
-                            index += sampleLength
-                        } else {
-                            index += 1
+                    // Compose from in-memory samples as fallback
+                    var lines: [String] = []
+                    if !samplesToSave.isEmpty {
+                        lines = samplesToSave.map { sample in
+                            let tsStr = String(sample.timestamp)
+                            let hex = sample.bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+                            return tsStr + "," + hex
+                        }
+                    } else {
+                        let bytes = [UInt8](dataToSave)
+                        var index = 0
+                        let sampleLength = 83
+                        while index + sampleLength <= bytes.count {
+                            if bytes[index] == 0x40 && bytes[index + 1] == 0xE1 {
+                                let sample = bytes[index..<(index + sampleLength)]
+                                let tsStr = String(UInt32(Date().timeIntervalSince1970))
+                                let hex = sample.map { String(format: "%02X", $0) }.joined(separator: " ")
+                                lines.append(tsStr + "," + hex)
+                                index += sampleLength
+                            } else {
+                                index += 1
+                            }
                         }
                     }
+                    guard !lines.isEmpty else {
+                        self.showAlert(title: "No BLE Data", message: "")
+                        return
+                    }
+                    let csvString = lines.joined(separator: "\n") + "\n"
+                    let csvData = Data(csvString.utf8)
+                    try csvData.write(to: tempURL, options: .atomic)
                 }
-                guard !lines.isEmpty else {
-                    self.showAlert(title: "No BLE Data", message: "")
-                    return
-                }
-                let csvString = lines.joined(separator: "\n") + "\n"
-                let csvData = Data(csvString.utf8)
-                try csvData.write(to: tempURL, options: .atomic)
                 let picker = UIDocumentPickerViewController(forExporting: [tempURL])
                 picker.allowsMultipleSelection = false
                 picker.delegate = self
@@ -534,6 +550,55 @@ class WorkoutControlViewController: UIViewController {
         let invalid = CharacterSet(charactersIn: "\\/:*?\"<>|\n\r\t")
         let cleanedScalars = name.unicodeScalars.map { invalid.contains($0) ? "_" : String($0) }.joined()
         return cleanedScalars.isEmpty ? "workout" : cleanedScalars
+    }
+    
+    // MARK: - Incremental Recording Helpers
+    private func startIncrementalRecording() {
+        // Close previous if any
+        closeIncrementalRecording()
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMddyyyy_HHmm"
+        let stamp = formatter.string(from: Date())
+        let serialDigits = (self.connectedDevice?.serialNumber ?? "").filter { $0.isNumber }
+        let lastFiveRaw = String(serialDigits.suffix(5))
+        let lastFive = (lastFiveRaw.count < 5) ? String(repeating: "0", count: 5 - lastFiveRaw.count) + lastFiveRaw : lastFiveRaw
+        let tempName = "ZonePcks_\(lastFive)_\(stamp)_recording.csv"
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(tempName)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            recordingFileURL = url
+            recordingFileHandle = handle
+        } catch {
+            recordingFileURL = nil
+            recordingFileHandle = nil
+        }
+    }
+    
+    private func appendSampleToRecordingFile(timestamp: UInt32, bytes: [UInt8]) {
+        guard let handle = recordingFileHandle else { return }
+        let tsStr = String(timestamp)
+        let hex = bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+        let line = tsStr + "," + hex + "\n"
+        if let data = line.data(using: .utf8) {
+            do {
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } catch {
+                // Ignore write errors silently during capture
+            }
+        }
+    }
+    
+    private func closeIncrementalRecording(deleteFile: Bool = false) {
+        if let handle = recordingFileHandle {
+            try? handle.close()
+        }
+        if deleteFile, let url = recordingFileURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        recordingFileHandle = nil
+        recordingFileURL = nil
     }
     
     private func showAlert(title: String, message: String) {
@@ -580,6 +645,8 @@ extension WorkoutControlViewController: BLEManagerDelegate {
                 self.workoutStartDate = nil
                 self.streamAssemblyBuffer.removeAll(keepingCapacity: false)
                 self.capturedSamples.removeAll(keepingCapacity: false)
+                // Prepare incremental file
+                self.startIncrementalRecording()
             }
             if command == stopBytes {
                 if self.isRecordingWorkout || self.isAwaitingStartAck {
@@ -628,6 +695,8 @@ extension WorkoutControlViewController: BLEManagerDelegate {
                             // capture epoch seconds (UInt32, truncating)
                             let ts = UInt32(Date().timeIntervalSince1970)
                             self.capturedSamples.append((timestamp: ts, bytes: sample))
+                            // Append incrementally to file as CSV line: ts,HEX...
+                            self.appendSampleToRecordingFile(timestamp: ts, bytes: sample)
                             i += sampleLength
                         } else {
                             // wait for more bytes to complete this sample
@@ -674,16 +743,24 @@ extension WorkoutControlViewController: BLEManagerDelegate {
                     self.isRecordingWorkout = false
                     self.workoutStartDate = nil
                     self.recordedWorkoutData.removeAll(keepingCapacity: false)
+                    self.capturedSamples.removeAll(keepingCapacity: false)
+                    self.streamAssemblyBuffer.removeAll(keepingCapacity: false)
+                    self.closeIncrementalRecording(deleteFile: true)
                     print("WorkoutControlViewController: Discarded unsaved data after disconnect")
                     self.navigationController?.popViewController(animated: true)
                 }))
                 confirm.addAction(UIAlertAction(title: "Save", style: .default, handler: { _ in
                     // Capture data and date, then reset state before exporting
                     let dataToSave = self.recordedWorkoutData
+                    let samplesToSave = self.capturedSamples
                     let exportStartDate = self.workoutStartDate
                     self.isRecordingWorkout = false
                     self.workoutStartDate = nil
                     self.recordedWorkoutData.removeAll(keepingCapacity: false)
+                    self.capturedSamples.removeAll(keepingCapacity: false)
+                    self.streamAssemblyBuffer.removeAll(keepingCapacity: false)
+                    let incrementalURL = self.recordingFileURL
+                    self.closeIncrementalRecording()
                     // Build filename
                     let formatter = DateFormatter()
                     formatter.dateFormat = "MMddyyyy_HHmm"
@@ -694,31 +771,46 @@ extension WorkoutControlViewController: BLEManagerDelegate {
                     let fileName = "ZonePcks_\(lastFive)_\(stamp).csv"
                     let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
                     do {
-                        // Parse into 83-byte samples starting with 0x40 0xE1
-                        let bytes = [UInt8](dataToSave)
-                        var lines: [String] = []
-                        var index = 0
-                        let sampleLength = 83
-                        while index + sampleLength <= bytes.count {
-                            if bytes[index] == 0x40 && bytes[index + 1] == 0xE1 {
-                                let sample = bytes[index..<(index + sampleLength)]
-                                let line = sample.map { String(format: "%02X", $0) }.joined(separator: " ")
-                                lines.append(line)
-                                index += sampleLength
+                        // Prefer incremental file if present
+                        if let incURL = incrementalURL, FileManager.default.fileExists(atPath: incURL.path) {
+                            try? FileManager.default.removeItem(at: tempURL)
+                            try FileManager.default.moveItem(at: incURL, to: tempURL)
+                        } else {
+                            // Compose from memory with epoch prefix
+                            var lines: [String] = []
+                            if !samplesToSave.isEmpty {
+                                lines = samplesToSave.map { sample in
+                                    let tsStr = String(sample.timestamp)
+                                    let hex = sample.bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+                                    return tsStr + "," + hex
+                                }
                             } else {
-                                index += 1
+                                let bytes = [UInt8](dataToSave)
+                                var index = 0
+                                let sampleLength = 83
+                                while index + sampleLength <= bytes.count {
+                                    if bytes[index] == 0x40 && bytes[index + 1] == 0xE1 {
+                                        let sample = bytes[index..<(index + sampleLength)]
+                                        let tsStr = String(UInt32(Date().timeIntervalSince1970))
+                                        let hex = sample.map { String(format: "%02X", $0) }.joined(separator: " ")
+                                        lines.append(tsStr + "," + hex)
+                                        index += sampleLength
+                                    } else {
+                                        index += 1
+                                    }
+                                }
                             }
+                            if lines.isEmpty {
+                                self.showAlert(title: "No BLE Data", message: "")
+                                return
+                            }
+                            let csvString = lines.joined(separator: "\n") + "\n"
+                            let csvData = Data(csvString.utf8)
+                            try csvData.write(to: tempURL, options: .atomic)
                         }
-                        if lines.isEmpty {
-                            self.showAlert(title: "No BLE Data", message: "")
-                            return
-                        }
-                        let csvString = lines.joined(separator: "\n") + "\n"
-                        let csvData = Data(csvString.utf8)
-                        try csvData.write(to: tempURL, options: .atomic)
                         let picker = UIDocumentPickerViewController(forExporting: [tempURL])
                         picker.allowsMultipleSelection = false
-                        // Do not set delegate here; export completion should not trigger firmware handling
+                        picker.delegate = self
                         self.isSelectingFirmwareFile = false
                         self.isExportingWorkoutFile = true
                         self.exportShouldPopToScan = true
