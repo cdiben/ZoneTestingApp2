@@ -25,6 +25,7 @@ class WorkoutControlViewController: UIViewController {
     private var firmwareProgressLabel: UILabel!
     private var batteryLabel: UILabel!
     private var blueLedButton: UIButton!
+    private var backToScanButton: UIButton!
     
     // Track last two commands and replies for on-screen log
     private var recentSentCommands: [String] = []
@@ -37,6 +38,11 @@ class WorkoutControlViewController: UIViewController {
     private var workoutStartDate: Date?
     // Track intent for document picker (firmware vs export)
     private var isSelectingFirmwareFile: Bool = false
+    private var isExportingWorkoutFile: Bool = false
+    private var exportShouldPopToScan: Bool = false
+    // Streaming parser buffers for timestamped samples
+    private var streamAssemblyBuffer: [UInt8] = []
+    private var capturedSamples: [(timestamp: UInt32, bytes: [UInt8])] = []
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -181,6 +187,15 @@ class WorkoutControlViewController: UIViewController {
         blueLedButton.translatesAutoresizingMaskIntoConstraints = false
         blueLedButton.addTarget(self, action: #selector(blueLedTapped), for: .touchUpInside)
         view.addSubview(blueLedButton)
+
+        // Back to Scan button (top-left)
+        backToScanButton = UIButton(type: .system)
+        backToScanButton.setTitle("Back to Scan", for: .normal)
+        backToScanButton.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
+        backToScanButton.setTitleColor(.systemBlue, for: .normal)
+        backToScanButton.translatesAutoresizingMaskIntoConstraints = false
+        backToScanButton.addTarget(self, action: #selector(backToScanTapped), for: .touchUpInside)
+        view.addSubview(backToScanButton)
         
         // Setup constraints
         NSLayoutConstraint.activate([
@@ -251,6 +266,12 @@ class WorkoutControlViewController: UIViewController {
             blueLedButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
             blueLedButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
             blueLedButton.heightAnchor.constraint(equalToConstant: 44)
+        ])
+
+        // Back to Scan button constraints (top-left)
+        NSLayoutConstraint.activate([
+            backToScanButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            backToScanButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12)
         ])
         
         // Add some visual enhancements
@@ -366,27 +387,24 @@ class WorkoutControlViewController: UIViewController {
     }
     
     @objc private func disconnectTapped() {
-        let alert = UIAlertController(title: "Disconnect Device", 
-                                    message: "Are you sure you want to disconnect from \(connectedDevice?.name ?? "this device")?", 
-                                    preferredStyle: .alert)
-        
+        // If already disconnected or no peripheral, just go back to scan
+        if !bleManager.isConnected {
+            navigationController?.popViewController(animated: true)
+            return
+        }
+        let alert = UIAlertController(title: "Disconnect Device",
+                                      message: "Are you sure you want to disconnect from \(connectedDevice?.name ?? "this device")?",
+                                      preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(UIAlertAction(title: "Disconnect", style: .destructive) { _ in
-            // Pass timer values back to device list
-            if let deviceListVC = self.navigationController?.viewControllers.first as? DeviceListViewController,
-               let deviceName = self.connectedDevice?.name {
-                deviceListVC.updateLastSession(
-                    deviceName: deviceName,
-                    connectionDuration: 0,
-                    workoutDuration: 0
-                )
-            }
-            
             self.stopAllTimers()
             self.bleManager.disconnect()
         })
-        
         present(alert, animated: true)
+    }
+
+    @objc private func backToScanTapped() {
+        navigationController?.popViewController(animated: true)
     }
 
     @objc private func updateFirmwareTapped() {
@@ -428,35 +446,88 @@ class WorkoutControlViewController: UIViewController {
     private func stopRecordingAndPromptSave() {
         // End any pending start state
         isAwaitingStartAck = false
-        defer {
-            // Reset state after attempting save
+        guard !recordedWorkoutData.isEmpty || !capturedSamples.isEmpty else {
+            showAlert(title: "No BLE Data", message: "")
+            // Reset state
             isRecordingWorkout = false
             workoutStartDate = nil
             recordedWorkoutData.removeAll(keepingCapacity: false)
-        }
-        guard !recordedWorkoutData.isEmpty else {
-            showAlert(title: "No BLE Data", message: "")
+            capturedSamples.removeAll(keepingCapacity: false)
+            streamAssemblyBuffer.removeAll(keepingCapacity: false)
             return
         }
-        // Create a temporary CSV file to export with space-separated hex byte pairs
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let stamp = formatter.string(from: workoutStartDate ?? Date())
-        let baseName = sanitizeFilename((connectedDevice?.name ?? "workout").replacingOccurrences(of: " ", with: "_"))
-        let fileName = "\(baseName)_\(stamp).csv"
-        let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
-        do {
-            let hexString = recordedWorkoutData.map { String(format: "%02X", $0) }.joined(separator: " ") + "\n"
-            let csvData = Data(hexString.utf8)
-            try csvData.write(to: tempURL, options: .atomic)
-            let picker = UIDocumentPickerViewController(forExporting: [tempURL])
-            picker.allowsMultipleSelection = false
-            // Do not set delegate here; export completion should not trigger firmware handling
-            isSelectingFirmwareFile = false
-            present(picker, animated: true)
-        } catch {
-            showAlert(title: "Save Failed", message: error.localizedDescription)
-        }
+        // Ask user whether to save or discard
+        let confirm = UIAlertController(title: "Save Data?", message: "Would you like to save the workout data?", preferredStyle: .alert)
+        confirm.addAction(UIAlertAction(title: "Discard", style: .destructive, handler: { _ in
+            // Discard data and reset state
+            self.isRecordingWorkout = false
+            self.workoutStartDate = nil
+            self.recordedWorkoutData.removeAll(keepingCapacity: false)
+            // Stay on workout screen (user stayed connected)
+        }))
+        confirm.addAction(UIAlertAction(title: "Save", style: .default, handler: { _ in
+            // Capture data and date, then reset state before exporting
+            let dataToSave = self.recordedWorkoutData
+            let samplesToSave = self.capturedSamples
+            let exportStartDate = self.workoutStartDate
+            self.isRecordingWorkout = false
+            self.workoutStartDate = nil
+            self.recordedWorkoutData.removeAll(keepingCapacity: false)
+            self.capturedSamples.removeAll(keepingCapacity: false)
+            self.streamAssemblyBuffer.removeAll(keepingCapacity: false)
+            // Build filename
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MMddyyyy_HHmm"
+            let stamp = formatter.string(from: exportStartDate ?? Date())
+            let serialDigits = (self.connectedDevice?.serialNumber ?? "").filter { $0.isNumber }
+            let lastFiveRaw = String(serialDigits.suffix(5))
+            let lastFive = (lastFiveRaw.count < 5) ? String(repeating: "0", count: 5 - lastFiveRaw.count) + lastFiveRaw : lastFiveRaw
+            let fileName = "ZonePcks_\(lastFive)_\(stamp).csv"
+            let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+            do {
+                // Prefer parsed timestamped samples; fallback to raw parse if none
+                var lines: [String] = []
+                if !samplesToSave.isEmpty {
+                    lines = samplesToSave.map { sample in
+                        let tsStr = String(sample.timestamp)
+                        let hex = sample.bytes.map { String(format: "%02X", $0) }.joined(separator: " ")
+                        return tsStr + "," + hex
+                    }
+                } else {
+                    let bytes = [UInt8](dataToSave)
+                    var index = 0
+                    let sampleLength = 83
+                    while index + sampleLength <= bytes.count {
+                        if bytes[index] == 0x40 && bytes[index + 1] == 0xE1 {
+                            let sample = bytes[index..<(index + sampleLength)]
+                            let tsStr = String(UInt32(Date().timeIntervalSince1970))
+                            let hex = sample.map { String(format: "%02X", $0) }.joined(separator: " ")
+                            lines.append(tsStr + "," + hex)
+                            index += sampleLength
+                        } else {
+                            index += 1
+                        }
+                    }
+                }
+                guard !lines.isEmpty else {
+                    self.showAlert(title: "No BLE Data", message: "")
+                    return
+                }
+                let csvString = lines.joined(separator: "\n") + "\n"
+                let csvData = Data(csvString.utf8)
+                try csvData.write(to: tempURL, options: .atomic)
+                let picker = UIDocumentPickerViewController(forExporting: [tempURL])
+                picker.allowsMultipleSelection = false
+                picker.delegate = self
+                self.isSelectingFirmwareFile = false
+                self.isExportingWorkoutFile = true
+                self.exportShouldPopToScan = false
+                self.present(picker, animated: true)
+            } catch {
+                self.showAlert(title: "Save Failed", message: error.localizedDescription)
+            }
+        }))
+        present(confirm, animated: true)
     }
     
     private func sanitizeFilename(_ name: String) -> String {
@@ -507,6 +578,8 @@ extension WorkoutControlViewController: BLEManagerDelegate {
                 self.isRecordingWorkout = false
                 self.recordedWorkoutData.removeAll(keepingCapacity: false)
                 self.workoutStartDate = nil
+                self.streamAssemblyBuffer.removeAll(keepingCapacity: false)
+                self.capturedSamples.removeAll(keepingCapacity: false)
             }
             if command == stopBytes {
                 if self.isRecordingWorkout || self.isAwaitingStartAck {
@@ -541,7 +614,32 @@ extension WorkoutControlViewController: BLEManagerDelegate {
                 }
             }
             if self.isRecordingWorkout && !payloadToAppend.isEmpty {
+                // Append to raw buffer (legacy)
                 self.recordedWorkoutData.append(contentsOf: payloadToAppend)
+                // Feed streaming parser to extract 83-byte samples prefixed by 0x40 0xE1
+                self.streamAssemblyBuffer.append(contentsOf: payloadToAppend)
+                let sampleLength = 83
+                // scan for headers; produce samples up to last complete one, keep remainder in buffer
+                var i = 0
+                while i + 2 <= self.streamAssemblyBuffer.count {
+                    if self.streamAssemblyBuffer[i] == 0x40 && self.streamAssemblyBuffer[i+1] == 0xE1 {
+                        if i + sampleLength <= self.streamAssemblyBuffer.count {
+                            let sample = Array(self.streamAssemblyBuffer[i..<(i + sampleLength)])
+                            // capture epoch seconds (UInt32, truncating)
+                            let ts = UInt32(Date().timeIntervalSince1970)
+                            self.capturedSamples.append((timestamp: ts, bytes: sample))
+                            i += sampleLength
+                        } else {
+                            // wait for more bytes to complete this sample
+                            break
+                        }
+                    } else {
+                        i += 1
+                    }
+                }
+                if i > 0 {
+                    self.streamAssemblyBuffer.removeFirst(i)
+                }
             }
             self.recentReplies.insert(hex, at: 0)
             if self.recentReplies.count > 2 { self.recentReplies.removeLast() }
@@ -567,9 +665,74 @@ extension WorkoutControlViewController: BLEManagerDelegate {
                 print("WorkoutControlViewController: Updated last session data")
             }
             
-            // Navigate back to device list
-            print("WorkoutControlViewController: Navigating back to device list")
-            self.navigationController?.popViewController(animated: true)
+            // If we have unsaved data, offer to save before leaving
+            if !self.recordedWorkoutData.isEmpty {
+                self.isAwaitingStartAck = false
+                let confirm = UIAlertController(title: "Save Data?", message: "Device disconnected. Save the recorded data?", preferredStyle: .alert)
+                confirm.addAction(UIAlertAction(title: "Discard", style: .destructive, handler: { _ in
+                    // Discard data and reset, then navigate back
+                    self.isRecordingWorkout = false
+                    self.workoutStartDate = nil
+                    self.recordedWorkoutData.removeAll(keepingCapacity: false)
+                    print("WorkoutControlViewController: Discarded unsaved data after disconnect")
+                    self.navigationController?.popViewController(animated: true)
+                }))
+                confirm.addAction(UIAlertAction(title: "Save", style: .default, handler: { _ in
+                    // Capture data and date, then reset state before exporting
+                    let dataToSave = self.recordedWorkoutData
+                    let exportStartDate = self.workoutStartDate
+                    self.isRecordingWorkout = false
+                    self.workoutStartDate = nil
+                    self.recordedWorkoutData.removeAll(keepingCapacity: false)
+                    // Build filename
+                    let formatter = DateFormatter()
+                    formatter.dateFormat = "MMddyyyy_HHmm"
+                    let stamp = formatter.string(from: exportStartDate ?? Date())
+                    let serialDigits = (self.connectedDevice?.serialNumber ?? "").filter { $0.isNumber }
+                    let lastFiveRaw = String(serialDigits.suffix(5))
+                    let lastFive = (lastFiveRaw.count < 5) ? String(repeating: "0", count: 5 - lastFiveRaw.count) + lastFiveRaw : lastFiveRaw
+                    let fileName = "ZonePcks_\(lastFive)_\(stamp).csv"
+                    let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+                    do {
+                        // Parse into 83-byte samples starting with 0x40 0xE1
+                        let bytes = [UInt8](dataToSave)
+                        var lines: [String] = []
+                        var index = 0
+                        let sampleLength = 83
+                        while index + sampleLength <= bytes.count {
+                            if bytes[index] == 0x40 && bytes[index + 1] == 0xE1 {
+                                let sample = bytes[index..<(index + sampleLength)]
+                                let line = sample.map { String(format: "%02X", $0) }.joined(separator: " ")
+                                lines.append(line)
+                                index += sampleLength
+                            } else {
+                                index += 1
+                            }
+                        }
+                        if lines.isEmpty {
+                            self.showAlert(title: "No BLE Data", message: "")
+                            return
+                        }
+                        let csvString = lines.joined(separator: "\n") + "\n"
+                        let csvData = Data(csvString.utf8)
+                        try csvData.write(to: tempURL, options: .atomic)
+                        let picker = UIDocumentPickerViewController(forExporting: [tempURL])
+                        picker.allowsMultipleSelection = false
+                        // Do not set delegate here; export completion should not trigger firmware handling
+                        self.isSelectingFirmwareFile = false
+                        self.isExportingWorkoutFile = true
+                        self.exportShouldPopToScan = true
+                        self.present(picker, animated: true)
+                    } catch {
+                        self.showAlert(title: "Save Failed", message: error.localizedDescription)
+                    }
+                }))
+                self.present(confirm, animated: true)
+            } else {
+                // Navigate back to device list
+                print("WorkoutControlViewController: Navigating back to device list")
+                self.navigationController?.popViewController(animated: true)
+            }
         }
     }
     
@@ -647,6 +810,16 @@ extension WorkoutControlViewController: BLEFirmwareUpdateDelegate {
 // MARK: - Document Picker
 extension WorkoutControlViewController: UIDocumentPickerDelegate {
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        // If this callback is for export, just dismiss and go back to scan screen
+        if isExportingWorkoutFile {
+            let shouldPop = exportShouldPopToScan
+            isExportingWorkoutFile = false
+            exportShouldPopToScan = false
+            if shouldPop {
+                self.navigationController?.popViewController(animated: true)
+            }
+            return
+        }
         guard isSelectingFirmwareFile else { return }
         guard let url = urls.first else { return }
         var data: Data?
@@ -683,6 +856,17 @@ extension WorkoutControlViewController: UIDocumentPickerDelegate {
             firmwareProgressLabel.text = "Failed to load file: \(message)"
         }
         isSelectingFirmwareFile = false
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        if isExportingWorkoutFile {
+            let shouldPop = exportShouldPopToScan
+            isExportingWorkoutFile = false
+            exportShouldPopToScan = false
+            if shouldPop {
+                self.navigationController?.popViewController(animated: true)
+            }
+        }
     }
 }
 
