@@ -6,6 +6,8 @@
 //
 
 import UIKit
+import AudioToolbox
+import AVFoundation
 import UniformTypeIdentifiers
 
 class WorkoutControlViewController: UIViewController {
@@ -26,6 +28,24 @@ class WorkoutControlViewController: UIViewController {
     private var batteryLabel: UILabel!
     private var blueLedButton: UIButton!
     private var backToScanButton: UIButton!
+    private var liveDataToggleButton: UIButton!
+    private var liveDataContainerView: UIView!
+    private var liveDataStackView: UIStackView!
+    private var triggerSettingsButton: UIButton!
+    private var triggersPanelView: UIView!
+    private var hrTriggerSwitch: UISwitch!
+    private var algoTriggerSwitch: UISwitch!
+    private var algorithmValueLabel: UILabel!
+    private var heartRateValueLabel: UILabel!
+    private var hrConfValueLabel: UILabel!
+    private var skinDetectValueLabel: UILabel!
+    private var isLiveDataVisible: Bool = false
+    private let speechSynth = AVSpeechSynthesizer()
+    private var lastAlarmSpokenAt: Date?
+    private let alarmCooldownSeconds: TimeInterval = 8.0
+    // Trigger enable flags
+    private var isHRTriggerEnabled: Bool = true
+    private var isAlgorithmTriggerEnabled: Bool = false
     
     // Track last two commands and replies for on-screen log
     private var recentSentCommands: [String] = []
@@ -60,6 +80,14 @@ class WorkoutControlViewController: UIViewController {
         setupBLEManager()
         
         print("WorkoutControlViewController: View loaded for device: \(connectedDevice?.name ?? "Unknown")")
+        // Configure audio session so alerts play audibly (and mix with other audio)
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.mixWithOthers, .duckOthers])
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            // Non-fatal; continue without special audio session
+        }
     }
     
     override func viewWillAppear(_ animated: Bool) {
@@ -206,6 +234,112 @@ class WorkoutControlViewController: UIViewController {
         backToScanButton.translatesAutoresizingMaskIntoConstraints = false
         backToScanButton.addTarget(self, action: #selector(backToScanTapped), for: .touchUpInside)
         view.addSubview(backToScanButton)
+
+        // Trigger settings button (top-right, square like Live)
+        triggerSettingsButton = UIButton(type: .system)
+        triggerSettingsButton.setTitle("Trig", for: .normal)
+        triggerSettingsButton.titleLabel?.font = UIFont.boldSystemFont(ofSize: 14)
+        triggerSettingsButton.setTitleColor(.white, for: .normal)
+        triggerSettingsButton.backgroundColor = .systemIndigo
+        triggerSettingsButton.layer.cornerRadius = 8
+        triggerSettingsButton.translatesAutoresizingMaskIntoConstraints = false
+        triggerSettingsButton.addTarget(self, action: #selector(triggerSettingsTapped), for: .touchUpInside)
+        view.addSubview(triggerSettingsButton)
+
+        // Live Data toggle button
+        liveDataToggleButton = UIButton(type: .system)
+        liveDataToggleButton.setTitle("Live", for: .normal)
+        liveDataToggleButton.titleLabel?.font = UIFont.boldSystemFont(ofSize: 14)
+        liveDataToggleButton.backgroundColor = .systemBlue
+        liveDataToggleButton.setTitleColor(.white, for: .normal)
+        liveDataToggleButton.layer.cornerRadius = 8
+        liveDataToggleButton.translatesAutoresizingMaskIntoConstraints = false
+        liveDataToggleButton.addTarget(self, action: #selector(toggleLiveDataTapped), for: .touchUpInside)
+        // Debug: long-press to play test beep
+        let liveLongPress = UILongPressGestureRecognizer(target: self, action: #selector(debugBeepGesture(_:)))
+        liveLongPress.minimumPressDuration = 0.5
+        liveDataToggleButton.addGestureRecognizer(liveLongPress)
+        liveDataToggleButton.isHidden = true
+        view.addSubview(liveDataToggleButton)
+
+        // Live Data container
+        liveDataContainerView = UIView()
+        liveDataContainerView.backgroundColor = UIColor.secondarySystemBackground
+        liveDataContainerView.layer.cornerRadius = 10
+        liveDataContainerView.layer.borderColor = UIColor.separator.cgColor
+        liveDataContainerView.layer.borderWidth = 1
+        liveDataContainerView.isHidden = true
+        liveDataContainerView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(liveDataContainerView)
+
+        // Triggers panel (hidden by default)
+        triggersPanelView = UIView()
+        triggersPanelView.backgroundColor = .secondarySystemBackground
+        triggersPanelView.layer.cornerRadius = 10
+        triggersPanelView.layer.borderColor = UIColor.separator.cgColor
+        triggersPanelView.layer.borderWidth = 1
+        triggersPanelView.isHidden = true
+        triggersPanelView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(triggersPanelView)
+
+        let hrLabel = UILabel()
+        hrLabel.text = "HR"
+        hrLabel.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        hrLabel.translatesAutoresizingMaskIntoConstraints = false
+        hrTriggerSwitch = UISwitch()
+        hrTriggerSwitch.isOn = isHRTriggerEnabled
+        hrTriggerSwitch.addTarget(self, action: #selector(hrSwitchChanged(_:)), for: .valueChanged)
+        hrTriggerSwitch.translatesAutoresizingMaskIntoConstraints = false
+
+        let algoLabel = UILabel()
+        algoLabel.text = "Alg=8"
+        algoLabel.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        algoLabel.translatesAutoresizingMaskIntoConstraints = false
+        algoTriggerSwitch = UISwitch()
+        algoTriggerSwitch.isOn = isAlgorithmTriggerEnabled
+        algoTriggerSwitch.addTarget(self, action: #selector(algoSwitchChanged(_:)), for: .valueChanged)
+        algoTriggerSwitch.translatesAutoresizingMaskIntoConstraints = false
+
+        triggersPanelView.addSubview(hrLabel)
+        triggersPanelView.addSubview(hrTriggerSwitch)
+        triggersPanelView.addSubview(algoLabel)
+        triggersPanelView.addSubview(algoTriggerSwitch)
+
+        func makeValueLabel(_ title: String) -> UILabel {
+            let label = UILabel()
+            label.font = UIFont.monospacedDigitSystemFont(ofSize: 14, weight: .regular)
+            label.textColor = .label
+            label.text = "\(title): --"
+            label.translatesAutoresizingMaskIntoConstraints = false
+            return label
+        }
+        func makeLargeValueLabel(_ title: String) -> UILabel {
+            let label = UILabel()
+            // Make value big, header small on first line
+            let valueFont = UIFont.monospacedDigitSystemFont(ofSize: 30, weight: .bold)
+            let headerFont = UIFont.systemFont(ofSize: 10, weight: .regular)
+            let header = NSAttributedString(string: "\(title)\n", attributes: [.font: headerFont, .foregroundColor: UIColor.secondaryLabel])
+            let value = NSAttributedString(string: "--", attributes: [.font: valueFont, .foregroundColor: UIColor.label])
+            let combined = NSMutableAttributedString()
+            combined.append(header)
+            combined.append(value)
+            label.attributedText = combined
+            label.textAlignment = .center
+            label.numberOfLines = 2
+            label.translatesAutoresizingMaskIntoConstraints = false
+            return label
+        }
+        algorithmValueLabel = makeLargeValueLabel("Algorithm")
+        heartRateValueLabel = makeLargeValueLabel("Heart Rate")
+        hrConfValueLabel = makeLargeValueLabel("HR Conf")
+        skinDetectValueLabel = makeLargeValueLabel("Skin Detect")
+        liveDataStackView = UIStackView(arrangedSubviews: [algorithmValueLabel, heartRateValueLabel, hrConfValueLabel, skinDetectValueLabel])
+        liveDataStackView.axis = .horizontal
+        liveDataStackView.distribution = .fillEqually
+        liveDataStackView.alignment = .fill
+        liveDataStackView.spacing = 12
+        liveDataStackView.translatesAutoresizingMaskIntoConstraints = false
+        liveDataContainerView.addSubview(liveDataStackView)
         
         // Setup constraints
         NSLayoutConstraint.activate([
@@ -236,8 +370,8 @@ class WorkoutControlViewController: UIViewController {
             firmwareProgressLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             firmwareProgressLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             
-            // Start workout button (now directly below connection status with extra spacing)
-            startWorkoutButton.topAnchor.constraint(equalTo: connectionStatusLabel.bottomAnchor, constant: 80),
+            // Start workout button now below live data container for more space
+            startWorkoutButton.topAnchor.constraint(equalTo: liveDataContainerView.bottomAnchor, constant: 16),
             startWorkoutButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
             startWorkoutButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
             startWorkoutButton.heightAnchor.constraint(equalToConstant: 60),
@@ -282,6 +416,60 @@ class WorkoutControlViewController: UIViewController {
         NSLayoutConstraint.activate([
             backToScanButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
             backToScanButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12)
+        ])
+
+        // Live Data toggle top-right and square
+        NSLayoutConstraint.activate([
+            liveDataToggleButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            liveDataToggleButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            liveDataToggleButton.widthAnchor.constraint(equalToConstant: 44),
+            liveDataToggleButton.heightAnchor.constraint(equalTo: liveDataToggleButton.widthAnchor)
+        ])
+
+        // Trigger settings button to the left of Live
+        NSLayoutConstraint.activate([
+            triggerSettingsButton.centerYAnchor.constraint(equalTo: liveDataToggleButton.centerYAnchor),
+            triggerSettingsButton.trailingAnchor.constraint(equalTo: liveDataToggleButton.leadingAnchor, constant: -12),
+            triggerSettingsButton.widthAnchor.constraint(equalToConstant: 44),
+            triggerSettingsButton.heightAnchor.constraint(equalTo: triggerSettingsButton.widthAnchor)
+        ])
+
+        // Live Data container constraints
+        NSLayoutConstraint.activate([
+            liveDataContainerView.topAnchor.constraint(equalTo: connectionStatusLabel.bottomAnchor, constant: 8),
+            liveDataContainerView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            liveDataContainerView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12)
+        ])
+        // Triggers panel constraints (below the buttons row)
+        NSLayoutConstraint.activate([
+            triggersPanelView.topAnchor.constraint(equalTo: liveDataContainerView.bottomAnchor, constant: 8),
+            triggersPanelView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            triggersPanelView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            // Make the panel taller while keeping its top fixed
+            triggersPanelView.heightAnchor.constraint(equalToConstant: 120)
+        ])
+        NSLayoutConstraint.activate([
+            // HR controls on the left (extra top spacing)
+            hrLabel.topAnchor.constraint(equalTo: triggersPanelView.topAnchor, constant: 20),
+            hrLabel.leadingAnchor.constraint(equalTo: triggersPanelView.leadingAnchor, constant: 12),
+            hrTriggerSwitch.centerYAnchor.constraint(equalTo: hrLabel.centerYAnchor),
+            hrTriggerSwitch.leadingAnchor.constraint(equalTo: hrLabel.trailingAnchor, constant: 8),
+
+            // Algorithm controls on the right
+            algoTriggerSwitch.centerYAnchor.constraint(equalTo: hrLabel.centerYAnchor),
+            algoTriggerSwitch.trailingAnchor.constraint(equalTo: triggersPanelView.trailingAnchor, constant: -12),
+            algoLabel.centerYAnchor.constraint(equalTo: hrLabel.centerYAnchor),
+            algoLabel.trailingAnchor.constraint(equalTo: algoTriggerSwitch.leadingAnchor, constant: -8),
+
+            // Panel bottom padding (allow extra space)
+            hrLabel.bottomAnchor.constraint(lessThanOrEqualTo: triggersPanelView.bottomAnchor, constant: -10)
+        ])
+        // Stack fills container with padding
+        NSLayoutConstraint.activate([
+            liveDataStackView.topAnchor.constraint(equalTo: liveDataContainerView.topAnchor, constant: 8),
+            liveDataStackView.leadingAnchor.constraint(equalTo: liveDataContainerView.leadingAnchor, constant: 8),
+            liveDataStackView.trailingAnchor.constraint(equalTo: liveDataContainerView.trailingAnchor, constant: -8),
+            liveDataStackView.bottomAnchor.constraint(equalTo: liveDataContainerView.bottomAnchor, constant: -8)
         ])
         
         // Add some visual enhancements
@@ -449,6 +637,40 @@ class WorkoutControlViewController: UIViewController {
         }) { _ in
             UIView.animate(withDuration: 0.1) {
                 button.transform = CGAffineTransform.identity
+            }
+        }
+    }
+    
+    @objc private func toggleLiveDataTapped() {
+        isLiveDataVisible.toggle()
+        liveDataContainerView.isHidden = !isLiveDataVisible
+        liveDataToggleButton.backgroundColor = isLiveDataVisible ? .systemGreen : .systemBlue
+    }
+
+    @objc private func triggerSettingsTapped() {
+        // Toggle panel visibility; stays open until user taps button again
+        let willShow = triggersPanelView.isHidden
+        triggersPanelView.isHidden = !willShow
+        // Keep switches in sync with current state
+        hrTriggerSwitch.isOn = isHRTriggerEnabled
+        algoTriggerSwitch.isOn = isAlgorithmTriggerEnabled
+    }
+
+    @objc private func hrSwitchChanged(_ sender: UISwitch) {
+        isHRTriggerEnabled = sender.isOn
+    }
+
+    @objc private func algoSwitchChanged(_ sender: UISwitch) {
+        isAlgorithmTriggerEnabled = sender.isOn
+    }
+
+    @objc private func debugBeepGesture(_ gesture: UILongPressGestureRecognizer) {
+        if gesture.state == .began {
+            // Debug: if algorithm trigger is enabled, test that; else test HR trigger
+            if isAlgorithmTriggerEnabled {
+                playAlgorithmAlarm(ignoreCooldown: true)
+            } else {
+                playHeartRateAlarm(ignoreCooldown: true)
             }
         }
     }
@@ -625,6 +847,75 @@ class WorkoutControlViewController: UIViewController {
         }
     }
     
+    private func updateLiveDataView(with sample: [UInt8]) {
+        // Ensure sample has 83 bytes
+        guard sample.count >= 83 else { return }
+        // Byte indices are 1-based in description; adjust for 0-based array
+        // 64th byte -> index 63
+        let algorithm = Int(sample[63])
+        // Next two bytes (65th, 66th) MSB first -> indices 64, 65
+        let hrRaw: Int = (Int(sample[64]) << 8) | Int(sample[65])
+        let heartRate: Int = hrRaw / 10
+        // Next byte (67th) -> index 66
+        let hrConf = Int(sample[66])
+        // 83rd byte -> index 82
+        let skinDetect = Int(sample[82])
+        func setAttributed(_ label: UILabel, header: String, value: String) {
+            let headerAttr = NSAttributedString(string: "\(header)\n", attributes: [
+                .font: UIFont.systemFont(ofSize: 10, weight: .regular),
+                .foregroundColor: UIColor.secondaryLabel
+            ])
+            let valueAttr = NSAttributedString(string: value, attributes: [
+                .font: UIFont.monospacedDigitSystemFont(ofSize: 30, weight: .bold),
+                .foregroundColor: UIColor.label
+            ])
+            let combined = NSMutableAttributedString()
+            combined.append(headerAttr)
+            combined.append(valueAttr)
+            label.attributedText = combined
+        }
+        setAttributed(algorithmValueLabel, header: "Algorithm", value: "\(algorithm)")
+        setAttributed(heartRateValueLabel, header: "Heart Rate", value: "\(heartRate)")
+        setAttributed(hrConfValueLabel, header: "HR Conf", value: "\(hrConf)")
+        setAttributed(skinDetectValueLabel, header: "Skin Detect", value: "\(skinDetect)")
+        // Play longer alarm sound if HR out of range and live view is visible
+        if isLiveDataVisible && isHRTriggerEnabled && ((heartRate > 0 && heartRate < 40) || heartRate > 200) {
+            playHeartRateAlarm(ignoreCooldown: false)
+        }
+        if isLiveDataVisible && isAlgorithmTriggerEnabled && algorithm == 8 {
+            playAlgorithmAlarm(ignoreCooldown: false)
+        }
+    }
+
+    private func playHeartRateAlarm(ignoreCooldown: Bool) {
+        let now = Date()
+        if ignoreCooldown || lastAlarmSpokenAt == nil || now.timeIntervalSince(lastAlarmSpokenAt!) > alarmCooldownSeconds {
+            lastAlarmSpokenAt = now
+            let utterance = AVSpeechUtterance(string: "Heart rate alert")
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+            utterance.rate = 0.45
+            utterance.volume = 1.0
+            utterance.pitchMultiplier = 1.0
+            speechSynth.speak(utterance)
+            // Also trigger system alert sound as fallback
+            AudioServicesPlayAlertSound(1005)
+        }
+    }
+
+    private func playAlgorithmAlarm(ignoreCooldown: Bool) {
+        let now = Date()
+        if ignoreCooldown || lastAlarmSpokenAt == nil || now.timeIntervalSince(lastAlarmSpokenAt!) > alarmCooldownSeconds {
+            lastAlarmSpokenAt = now
+            let utterance = AVSpeechUtterance(string: "Algorithm eight alert")
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+            utterance.rate = 0.45
+            utterance.volume = 1.0
+            utterance.pitchMultiplier = 1.0
+            speechSynth.speak(utterance)
+            AudioServicesPlayAlertSound(1005)
+        }
+    }
+    
     // MARK: - Reconnect logic on unexpected disconnect
     private func presentReconnectAlertAndStartLoop() {
         reconnectTimer?.invalidate()
@@ -659,8 +950,8 @@ class WorkoutControlViewController: UIViewController {
     }
     
     private func attemptReconnect(to device: BLEDevice) {
-        // If we still have the peripheral reference, ask BLEManager to connect
-        bleManager.connect(to: device)
+        // If we still have the peripheral reference, ask BLEManager to connect without timeout UX
+        bleManager.connect(to: device, isReconnect: true)
     }
     
     private func presentSaveAfterReconnectFailure() {
@@ -841,6 +1132,14 @@ extension WorkoutControlViewController: BLEManagerDelegate {
                             self.capturedSamples.append((timestamp: ts, bytes: sample))
                             // Append incrementally to file as CSV line: ts,HEX...
                             self.appendSampleToRecordingFile(timestamp: ts, bytes: sample)
+                            // Ensure toggle button appears as soon as 40 E1 data is seen
+                            if self.liveDataToggleButton.isHidden {
+                                self.liveDataToggleButton.isHidden = false
+                            }
+                            // Update live data view if visible
+                            if self.isLiveDataVisible {
+                                self.updateLiveDataView(with: sample)
+                            }
                             i += sampleLength
                         } else {
                             // wait for more bytes to complete this sample
@@ -896,6 +1195,10 @@ extension WorkoutControlViewController: BLEManagerDelegate {
     func didFailToConnect(_ device: BLEDevice, error: Error?) {
         print("WorkoutControlViewController: Failed to connect to device: \(device.name), error: \(error?.localizedDescription ?? "Unknown")")
         DispatchQueue.main.async {
+            // Suppress user-facing alerts during our reconnect attempts
+            if self.isAttemptingReconnect {
+                return
+            }
             // Pass timer values back to device list
             if let deviceListVC = self.navigationController?.viewControllers.first as? DeviceListViewController {
                 deviceListVC.updateLastSession(

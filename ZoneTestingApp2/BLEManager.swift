@@ -52,6 +52,8 @@ class BLEManager: NSObject, ObservableObject {
     private var rxCharacteristic: CBCharacteristic?
     private var notifyCharacteristics: [CBCharacteristic] = []
     private var hasSentPostConnectInit = false
+    // When true, skip sending post-connect init (0x4021) and battery request (0x4006) on the next connect
+    private var skipInitOnNextConnect = false
     private var connectionEstablishedAt: Date?
     private var postConnectInitWorkItem: DispatchWorkItem?
     private var connectionTimer: Timer?
@@ -85,6 +87,12 @@ class BLEManager: NSObject, ObservableObject {
 
     private func schedulePostConnectInitIfReady() {
         guard !hasSentPostConnectInit else { return }
+        // Suppress init/battery on reconnect attempts
+        if skipInitOnNextConnect {
+            hasSentPostConnectInit = true
+            skipInitOnNextConnect = false
+            return
+        }
         guard isConnected, rxCharacteristic != nil else { return }
         let targetDelay: TimeInterval = 1.0
         let elapsed = connectionEstablishedAt.map { Date().timeIntervalSince($0) } ?? 0
@@ -216,17 +224,21 @@ class BLEManager: NSObject, ObservableObject {
         }
     }
     
-    func connect(to device: BLEDevice) {
+    func connect(to device: BLEDevice, isReconnect: Bool = false) {
         stopScanning()
         print("Attempting to connect to \(device.name)...")
         
-        // Set a connection timeout
-        connectionTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { _ in
-            print("Connection timeout")
-            self.centralManager.cancelPeripheralConnection(device.peripheral)
-            self.delegate?.didFailToConnect(device, error: NSError(domain: "BLEManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Connection timeout"]))
+        // Set a connection timeout (skip when in reconnect loop; controller will manage UX)
+        if !isReconnect {
+            connectionTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: false) { _ in
+                print("Connection timeout")
+                self.centralManager.cancelPeripheralConnection(device.peripheral)
+                self.delegate?.didFailToConnect(device, error: NSError(domain: "BLEManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Connection timeout"]))
+            }
         }
         
+        // Remember if this is a reconnect so we can skip post-connect init on this session
+        skipInitOnNextConnect = isReconnect
         centralManager.connect(device.peripheral, options: nil)
     }
     
