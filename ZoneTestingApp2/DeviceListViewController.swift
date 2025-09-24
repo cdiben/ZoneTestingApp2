@@ -370,9 +370,9 @@ extension DeviceListViewController: BLEManagerDelegate {
         print("DeviceListViewController: Firmware version for \(device.name): \(version)")
     }
 
-    func didUpdateBatteryLevel(_ device: BLEDevice, percent: Int) {
+    func didUpdateBatteryLevel(_ device: BLEDevice, percent: Int, voltage: Double) {
         // Not displayed here
-        print("DeviceListViewController: Battery for \(device.name): \(percent)%")
+        print("DeviceListViewController: Battery for \(device.name): \(percent)%  (\(String(format: "%.3fV", voltage)))")
     }
 }
 

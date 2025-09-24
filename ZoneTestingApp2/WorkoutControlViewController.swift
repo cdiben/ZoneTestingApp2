@@ -29,12 +29,15 @@ class WorkoutControlViewController: UIViewController {
     private var blueLedButton: UIButton!
     private var backToScanButton: UIButton!
     private var liveDataToggleButton: UIButton!
+    private var batteryButton: UIButton!
     private var liveDataContainerView: UIView!
     private var liveDataStackView: UIStackView!
     private var triggerSettingsButton: UIButton!
     private var triggersPanelView: UIView!
     private var hrTriggerSwitch: UISwitch!
     private var algoTriggerSwitch: UISwitch!
+    private var hrResetLabel: UILabel!
+    private var hrResetTriggerSwitch: UISwitch!
     private var algorithmValueLabel: UILabel!
     private var heartRateValueLabel: UILabel!
     private var hrConfValueLabel: UILabel!
@@ -43,9 +46,10 @@ class WorkoutControlViewController: UIViewController {
     private let speechSynth = AVSpeechSynthesizer()
     private var lastAlarmSpokenAt: Date?
     private let alarmCooldownSeconds: TimeInterval = 8.0
-    // Trigger enable flags
-    private var isHRTriggerEnabled: Bool = true
+    // Trigger enable flags (default off)
+    private var isHRTriggerEnabled: Bool = false
     private var isAlgorithmTriggerEnabled: Bool = false
+    private var isHRResetTriggerEnabled: Bool = false
     
     // Track last two commands and replies for on-screen log
     private var recentSentCommands: [String] = []
@@ -304,6 +308,17 @@ class WorkoutControlViewController: UIViewController {
         triggersPanelView.addSubview(hrTriggerSwitch)
         triggersPanelView.addSubview(algoLabel)
         triggersPanelView.addSubview(algoTriggerSwitch)
+        // HR=10 Reset controls
+        hrResetLabel = UILabel()
+        hrResetLabel.text = "HR=10 Reset"
+        hrResetLabel.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        hrResetLabel.translatesAutoresizingMaskIntoConstraints = false
+        hrResetTriggerSwitch = UISwitch()
+        hrResetTriggerSwitch.isOn = isHRResetTriggerEnabled
+        hrResetTriggerSwitch.addTarget(self, action: #selector(hrResetSwitchChanged(_:)), for: .valueChanged)
+        hrResetTriggerSwitch.translatesAutoresizingMaskIntoConstraints = false
+        triggersPanelView.addSubview(hrResetLabel)
+        triggersPanelView.addSubview(hrResetTriggerSwitch)
 
         func makeValueLabel(_ title: String) -> UILabel {
             let label = UILabel()
@@ -426,6 +441,23 @@ class WorkoutControlViewController: UIViewController {
             liveDataToggleButton.heightAnchor.constraint(equalTo: liveDataToggleButton.widthAnchor)
         ])
 
+        // Battery (Bat) button under Live
+        batteryButton = UIButton(type: .system)
+        batteryButton.setTitle("Bat", for: .normal)
+        batteryButton.titleLabel?.font = UIFont.boldSystemFont(ofSize: 14)
+        batteryButton.backgroundColor = .systemGray
+        batteryButton.setTitleColor(.white, for: .normal)
+        batteryButton.layer.cornerRadius = 8
+        batteryButton.translatesAutoresizingMaskIntoConstraints = false
+        batteryButton.addTarget(self, action: #selector(batteryTapped), for: .touchUpInside)
+        view.addSubview(batteryButton)
+        NSLayoutConstraint.activate([
+            batteryButton.topAnchor.constraint(equalTo: liveDataToggleButton.bottomAnchor, constant: 8),
+            batteryButton.centerXAnchor.constraint(equalTo: liveDataToggleButton.centerXAnchor),
+            batteryButton.widthAnchor.constraint(equalToConstant: 44),
+            batteryButton.heightAnchor.constraint(equalTo: batteryButton.widthAnchor)
+        ])
+
         // Trigger settings button to the left of Live
         NSLayoutConstraint.activate([
             triggerSettingsButton.centerYAnchor.constraint(equalTo: liveDataToggleButton.centerYAnchor),
@@ -461,8 +493,14 @@ class WorkoutControlViewController: UIViewController {
             algoLabel.centerYAnchor.constraint(equalTo: hrLabel.centerYAnchor),
             algoLabel.trailingAnchor.constraint(equalTo: algoTriggerSwitch.leadingAnchor, constant: -8),
 
+            // Second row: HR=10 Reset aligned below first row
+            hrResetLabel.topAnchor.constraint(equalTo: hrLabel.bottomAnchor, constant: 16),
+            hrResetLabel.leadingAnchor.constraint(equalTo: triggersPanelView.leadingAnchor, constant: 12),
+            hrResetTriggerSwitch.centerYAnchor.constraint(equalTo: hrResetLabel.centerYAnchor),
+            hrResetTriggerSwitch.leadingAnchor.constraint(equalTo: hrResetLabel.trailingAnchor, constant: 8),
+
             // Panel bottom padding (allow extra space)
-            hrLabel.bottomAnchor.constraint(lessThanOrEqualTo: triggersPanelView.bottomAnchor, constant: -10)
+            hrResetLabel.bottomAnchor.constraint(lessThanOrEqualTo: triggersPanelView.bottomAnchor, constant: -12)
         ])
         // Stack fills container with padding
         NSLayoutConstraint.activate([
@@ -545,6 +583,8 @@ class WorkoutControlViewController: UIViewController {
             stopWorkoutButton.isEnabled = true
             startWorkoutButton.alpha = 1.0
             stopWorkoutButton.alpha = 1.0
+            // Ensure Live button is visible when connected
+            liveDataToggleButton.isHidden = false
         } else {
             connectionStatusLabel.text = "Disconnected"
             connectionStatusLabel.textColor = .systemRed
@@ -552,6 +592,10 @@ class WorkoutControlViewController: UIViewController {
             stopWorkoutButton.isEnabled = false
             startWorkoutButton.alpha = 0.5
             stopWorkoutButton.alpha = 0.5
+            // Hide Live UI when disconnected
+            liveDataToggleButton.isHidden = true
+            isLiveDataVisible = false
+            liveDataContainerView.isHidden = true
         }
     }
     
@@ -641,6 +685,14 @@ class WorkoutControlViewController: UIViewController {
         }
     }
     
+    @objc private func batteryTapped() {
+        guard bleManager.isConnected else {
+            showAlert(title: "Not Connected", message: "Device is not connected")
+            return
+        }
+        bleManager.requestBatteryLevel()
+    }
+    
     @objc private func toggleLiveDataTapped() {
         isLiveDataVisible.toggle()
         liveDataContainerView.isHidden = !isLiveDataVisible
@@ -654,6 +706,7 @@ class WorkoutControlViewController: UIViewController {
         // Keep switches in sync with current state
         hrTriggerSwitch.isOn = isHRTriggerEnabled
         algoTriggerSwitch.isOn = isAlgorithmTriggerEnabled
+        hrResetTriggerSwitch.isOn = isHRResetTriggerEnabled
     }
 
     @objc private func hrSwitchChanged(_ sender: UISwitch) {
@@ -662,6 +715,10 @@ class WorkoutControlViewController: UIViewController {
 
     @objc private func algoSwitchChanged(_ sender: UISwitch) {
         isAlgorithmTriggerEnabled = sender.isOn
+    }
+
+    @objc private func hrResetSwitchChanged(_ sender: UISwitch) {
+        isHRResetTriggerEnabled = sender.isOn
     }
 
     @objc private func debugBeepGesture(_ gesture: UILongPressGestureRecognizer) {
@@ -740,7 +797,7 @@ class WorkoutControlViewController: UIViewController {
                     } else {
                         let bytes = [UInt8](dataToSave)
                         var index = 0
-                        let sampleLength = 83
+                        let sampleLength = 100
                         while index + sampleLength <= bytes.count {
                             if bytes[index] == 0x40 && bytes[index + 1] == 0xE1 {
                                 let sample = bytes[index..<(index + sampleLength)]
@@ -848,7 +905,7 @@ class WorkoutControlViewController: UIViewController {
     }
     
     private func updateLiveDataView(with sample: [UInt8]) {
-        // Ensure sample has 83 bytes
+        // Ensure sample has at least the original 83 bytes (new bytes are appended at the end)
         guard sample.count >= 83 else { return }
         // Byte indices are 1-based in description; adjust for 0-based array
         // 64th byte -> index 63
@@ -858,7 +915,7 @@ class WorkoutControlViewController: UIViewController {
         let heartRate: Int = hrRaw / 10
         // Next byte (67th) -> index 66
         let hrConf = Int(sample[66])
-        // 83rd byte -> index 82
+        // 83rd byte -> index 82 (unchanged; extra bytes are appended beyond this)
         let skinDetect = Int(sample[82])
         func setAttributed(_ label: UILabel, header: String, value: String) {
             let headerAttr = NSAttributedString(string: "\(header)\n", attributes: [
@@ -880,6 +937,9 @@ class WorkoutControlViewController: UIViewController {
         setAttributed(skinDetectValueLabel, header: "Skin Detect", value: "\(skinDetect)")
         // Play longer alarm sound if HR out of range and live view is visible
         if isLiveDataVisible && isHRTriggerEnabled && ((heartRate > 0 && heartRate < 40) || heartRate > 200) {
+            playHeartRateAlarm(ignoreCooldown: false)
+        }
+        if isLiveDataVisible && isHRResetTriggerEnabled && heartRate == 10 {
             playHeartRateAlarm(ignoreCooldown: false)
         }
         if isLiveDataVisible && isAlgorithmTriggerEnabled && algorithm == 8 {
@@ -1005,7 +1065,7 @@ class WorkoutControlViewController: UIViewController {
                     } else {
                         let bytes = [UInt8](dataToSave)
                         var index = 0
-                        let sampleLength = 83
+                        let sampleLength = 100
                         while index + sampleLength <= bytes.count {
                             if bytes[index] == 0x40 && bytes[index + 1] == 0xE1 {
                                 let sample = bytes[index..<(index + sampleLength)]
@@ -1064,6 +1124,8 @@ extension WorkoutControlViewController: BLEManagerDelegate {
             let names = UserDefaults.standard.dictionary(forKey: "CustomDeviceNames") as? [String: String] ?? [:]
             let key = device.serialNumber ?? device.id
             self.deviceNameLabel.text = names[key] ?? device.name
+            // Show Live button on connection
+            self.liveDataToggleButton.isHidden = false
         }
     }
 
@@ -1120,7 +1182,7 @@ extension WorkoutControlViewController: BLEManagerDelegate {
                 self.recordedWorkoutData.append(contentsOf: payloadToAppend)
                 // Feed streaming parser to extract 83-byte samples prefixed by 0x40 0xE1
                 self.streamAssemblyBuffer.append(contentsOf: payloadToAppend)
-                let sampleLength = 83
+                let sampleLength = 100
                 // scan for headers; produce samples up to last complete one, keep remainder in buffer
                 var i = 0
                 while i + 2 <= self.streamAssemblyBuffer.count {
@@ -1133,9 +1195,7 @@ extension WorkoutControlViewController: BLEManagerDelegate {
                             // Append incrementally to file as CSV line: ts,HEX...
                             self.appendSampleToRecordingFile(timestamp: ts, bytes: sample)
                             // Ensure toggle button appears as soon as 40 E1 data is seen
-                            if self.liveDataToggleButton.isHidden {
-                                self.liveDataToggleButton.isHidden = false
-                            }
+                            // Live button now shows on connect; no-op here
                             // Update live data view if visible
                             if self.isLiveDataVisible {
                                 self.updateLiveDataView(with: sample)
@@ -1332,10 +1392,11 @@ extension WorkoutControlViewController: UIDocumentPickerDelegate {
 
 // MARK: - Battery Updates
 extension WorkoutControlViewController {
-    func didUpdateBatteryLevel(_ device: BLEDevice, percent: Int) {
+    func didUpdateBatteryLevel(_ device: BLEDevice, percent: Int, voltage: Double) {
         guard connectedDevice?.id == device.id else { return }
         DispatchQueue.main.async {
-            self.batteryLabel.text = "Battery: \(percent)%"
+            let voltageStr = String(format: "%.3fV", voltage)
+            self.batteryLabel.text = "Battery: \(percent)%  \(voltageStr)"
         }
     }
 }

@@ -15,7 +15,7 @@ protocol BLEManagerDelegate: AnyObject {
     func didFailToConnect(_ device: BLEDevice, error: Error?)
     func didUpdateSerialNumber(_ device: BLEDevice)
     func didUpdateFirmwareVersion(_ device: BLEDevice, version: String)
-    func didUpdateBatteryLevel(_ device: BLEDevice, percent: Int)
+    func didUpdateBatteryLevel(_ device: BLEDevice, percent: Int, voltage: Double)
     func didSendCommand(_ command: [UInt8])
     func didReceiveReply(_ bytes: [UInt8])
 }
@@ -711,13 +711,14 @@ extension BLEManager: CBPeripheralDelegate {
                     }
                     firmwareDelegate?.firmwareUpdateCompleted()
                     firmwareContext = nil
-                } else if bytes.count >= 4 && bytes[0] == 0x40 && bytes[1] == 0x86 {
-                    // Battery response: last two bytes are battery level in hex
-                    let value = (Int(bytes[2]) << 8) | Int(bytes[3])
-                    let percent = max(0, min(100, value))
+                } else if bytes.count >= 6 && bytes[0] == 0x40 && bytes[1] == 0x86 && bytes[2] == 0x00 {
+                    // Battery response: 0x40 0x86 0x00 [pct] [voltage_L] [voltage_H]
+                    let percent = max(0, min(100, Int(bytes[3])))
+                    let voltageMilli = Int(bytes[4]) | (Int(bytes[5]) << 8)
+                    let voltage = Double(voltageMilli) / 1000.0
                     if let device = self.discoveredDevices.first(where: { $0.peripheral == peripheral }) {
                         DispatchQueue.main.async {
-                            self.delegate?.didUpdateBatteryLevel(device, percent: percent)
+                            self.delegate?.didUpdateBatteryLevel(device, percent: percent, voltage: voltage)
                         }
                     }
                 }
