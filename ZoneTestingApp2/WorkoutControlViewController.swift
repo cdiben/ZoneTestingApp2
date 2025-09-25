@@ -8,6 +8,7 @@
 import UIKit
 import AudioToolbox
 import AVFoundation
+import UserNotifications
 import UniformTypeIdentifiers
 
 class WorkoutControlViewController: UIViewController {
@@ -976,6 +977,23 @@ class WorkoutControlViewController: UIViewController {
         }
     }
     
+    private func playErrorAlarmAndNotify() {
+        // Speak error and play alert tone
+        let utterance = AVSpeechUtterance(string: "Error")
+        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+        utterance.rate = 0.45
+        utterance.volume = 1.0
+        speechSynth.speak(utterance)
+        AudioServicesPlayAlertSound(1005)
+        // Post a local notification for Error 10
+        let content = UNMutableNotificationContent()
+        content.title = "Device Error"
+        content.body = "Error 10 has occurred"
+        content.sound = UNNotificationSound.default
+        let req = UNNotificationRequest(identifier: "error10_\(UUID().uuidString)", content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req, withCompletionHandler: nil)
+    }
+    
     // MARK: - Reconnect logic on unexpected disconnect
     private func presentReconnectAlertAndStartLoop() {
         reconnectTimer?.invalidate()
@@ -1165,6 +1183,18 @@ extension WorkoutControlViewController: BLEManagerDelegate {
     func didReceiveReply(_ bytes: [UInt8]) {
         let hex = bytes.map { String(format: "0x%02X", $0) }.joined(separator: " ")
         DispatchQueue.main.async {
+            // Detect device error 0x40 0xE2 0xA0 → play alert and notify; do not save
+            if bytes.count >= 3 && bytes[0] == 0x40 && bytes[1] == 0xE2 && bytes[2] == 0xA0 {
+                self.playErrorAlarmAndNotify()
+                self.recentReplies.insert(hex, at: 0)
+                if self.recentReplies.count > 2 { self.recentReplies.removeLast() }
+                let combined = zip(self.recentSentCommands + ["", ""], self.recentReplies).map { sent, reply in
+                    sent.isEmpty ? "Reply: \(reply)" : "\(sent)\nReply: \(reply)"
+                }
+                self.commandStatusLabel.text = combined.prefix(2).joined(separator: "\n")
+                self.commandStatusLabel.textColor = .systemRed
+                return
+            }
             // Start recording after the first reply following Start command.
             // Do NOT write the 0x40 0x88 0x00 start-ack bytes; only record data after it.
             var payloadToAppend: [UInt8] = bytes
